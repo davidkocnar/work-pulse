@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>WorkPulse</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">⚡ WorkPulse</div>
+    <div class="month-nav">
+      <button id="prev-month" title="Previous month">‹</button>
+      <span id="month-label">—</span>
+      <button id="next-month" title="Next month">›</button>
+    </div>
+    <div class="actions">
+      <button id="today-btn" title="Today (T)">Today</button>
+      <button id="refresh-btn" title="Refresh from APIs">⟳ Refresh</button>
+      <button id="mappings-btn" title="Project mappings">Mappings</button>
+      <span id="status-pill" class="pill">…</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div id="calendar"></div>
+      <div class="legend">
+        <span><i class="dot dot-gh"></i> GitHub</span>
+        <span><i class="dot dot-sl"></i> Slack</span>
+      </div>
+      <div id="weekly-summary" class="weekly-summary"></div>
+    </aside>
+
+    <section class="day-panel">
+      <div class="day-head">
+        <h2 id="day-title">Select a day</h2>
+        <div id="day-counts" class="muted small"></div>
+      </div>
+      <div id="day-content" class="day-content">
+        <div class="empty">No day selected.</div>
+      </div>
+    </section>
+
+    <aside class="tempo-panel">
+      <div class="tempo-head">
+        <h3>Tempo log</h3>
+        <span id="tempo-total" class="muted small"></span>
+      </div>
+      <div id="favorites-bar" class="favorites-bar"></div>
+      <ul id="tempo-list" class="tempo-list"></ul>
+      <div class="tempo-add">
+        <button id="add-entry">+ Empty entry</button>
+        <button id="favorites-btn" title="Manage favorites">★ Favorites</button>
+      </div>
+      <div class="tempo-actions">
+        <button id="copy-btn">Copy</button>
+        <button id="send-btn" class="primary">Send to Tempo</button>
+      </div>
+      <div id="tempo-feedback" class="feedback"></div>
+    </aside>
+  </main>
+
+  <div id="mappings-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Project mappings</h3>
+        <button id="mappings-close">×</button>
+      </div>
+      <p class="muted small">
+        Map a GitHub repo (<code>org/repo</code>), Slack channel (without <code>#</code>),
+        or Slack DM (the other person's display name) to a Jira project key.
+      </p>
+      <table class="mappings-table">
+        <thead><tr><th>Type</th><th>Key</th><th>Project</th><th></th></tr></thead>
+        <tbody id="mappings-tbody"></tbody>
+      </table>
+      <button id="add-mapping">+ Add</button>
+      <div class="modal-foot">
+        <button id="save-mappings" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="favorites-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Favorite tasks</h3>
+        <button id="favorites-close">×</button>
+      </div>
+      <p class="muted small">
+        Quick-add tasks for any day. Click a chip in the Tempo log to log a draft entry for the selected day.
+      </p>
+      <table class="mappings-table">
+        <thead><tr><th>Issue</th><th>Time</th><th>Description</th><th>Label</th><th></th></tr></thead>
+        <tbody id="favorites-tbody"></tbody>
+      </table>
+      <div style="display:flex; gap:6px;">
+        <button id="add-favorite">+ Add</button>
+        <button id="suggest-favorites" title="Suggest favorites from your recent worklogs">★ Suggest from history</button>
+      </div>
+      <div id="favorites-suggestions" class="suggestions hidden"></div>
+      <div class="modal-foot">
+        <button id="save-favorites" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
