@@ -4,3 +4,5 @@ mappings.json
 .cache.json
 .DS_Store
 .idea/
+.google-tokens.json
+workpulse-config.json

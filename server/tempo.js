@@ -251,8 +251,39 @@ async function getSuggestions({ days = 90, limit = 15 }, env) {
   return list.slice(0, limit);
 }
 
+async function updateWorklog({ id, issueId, startDate, startTime, timeSeconds, description }, env) {
+  const { tempoToken } = env;
+  if (!tempoToken) throw new Error('TEMPO_TOKEN not configured');
+  const authorAccountId = await getMyAccountId(env);
+  const body = {
+    issueId,
+    authorAccountId,
+    startDate,
+    startTime: startTime || '09:00:00',
+    timeSpentSeconds: Math.max(60, Math.round(timeSeconds)),
+    description: description || '',
+  };
+  const res = await fetch(`https://api.tempo.io/4/worklogs/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${tempoToken}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`Tempo ${res.status}: ${text.slice(0, 300)}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
 module.exports = {
   createWorklog,
+  updateWorklog,
   resolveIssueId,
   resolveIssueKeysBulk,
   getMyAccountId,

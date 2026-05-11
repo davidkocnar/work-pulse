@@ -18,6 +18,7 @@
       <button id="today-btn" title="Today (T)">Today</button>
       <button id="refresh-btn" title="Refresh from APIs">⟳ Refresh</button>
       <button id="mappings-btn" title="Project mappings">Mappings</button>
+      <button id="settings-btn" title="Settings">⚙ Settings</button>
       <span id="status-pill" class="pill">…</span>
     </div>
   </header>
@@ -28,14 +29,18 @@
       <div class="legend">
         <span><i class="dot dot-gh"></i> GitHub</span>
         <span><i class="dot dot-sl"></i> Slack</span>
+<span><i class="dot dot-email"></i> Mail</span>
       </div>
       <div id="weekly-summary" class="weekly-summary"></div>
     </aside>
 
     <section class="day-panel">
       <div class="day-head">
-        <h2 id="day-title">Select a day</h2>
-        <div id="day-counts" class="muted small"></div>
+        <div class="day-head-main">
+          <h2 id="day-title">Select a day</h2>
+          <div id="day-counts" class="filter-chips-bar"></div>
+        </div>
+        <div id="day-hours" class="day-hours-badge"></div>
       </div>
       <div id="day-content" class="day-content">
         <div class="empty">No day selected.</div>
@@ -102,6 +107,59 @@
       <div id="favorites-suggestions" class="suggestions hidden"></div>
       <div class="modal-foot">
         <button id="save-favorites" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-card" style="width:min(580px,94vw)">
+      <div class="modal-head">
+        <h3>Settings</h3>
+        <button id="settings-close">×</button>
+      </div>
+
+      <div class="settings-section">
+        <h4>GitHub</h4>
+        <div class="settings-row"><label>Username</label><input id="cfg-github-username" type="text" placeholder="GITHUB_USERNAME" autocomplete="off" /></div>
+        <div class="settings-row"><label>Token</label><input id="cfg-github-token" type="password" placeholder="GITHUB_TOKEN" autocomplete="off" /></div>
+      </div>
+
+      <div class="settings-section">
+        <h4>Slack</h4>
+        <div class="settings-row"><label>Token</label><input id="cfg-slack-token" type="password" placeholder="SLACK_TOKEN (xoxp-…)" autocomplete="off" /></div>
+      </div>
+
+      <div class="settings-section">
+        <h4>Jira / Tempo</h4>
+        <div class="settings-row"><label>Base URL</label><input id="cfg-jira-url" type="text" placeholder="https://your-org.atlassian.net" autocomplete="off" /></div>
+        <div class="settings-row"><label>Email</label><input id="cfg-jira-email" type="text" placeholder="you@company.com" autocomplete="off" /></div>
+        <div class="settings-row"><label>Jira API Token</label><input id="cfg-jira-token" type="password" placeholder="JIRA_API_TOKEN" autocomplete="off" /></div>
+        <div class="settings-row"><label>Tempo Token</label><input id="cfg-tempo-token" type="password" placeholder="TEMPO_TOKEN" autocomplete="off" /></div>
+      </div>
+
+      <div class="settings-section">
+        <h4>Google (Calendar + Gmail)</h4>
+        <p class="muted small" style="margin:0 0 8px">
+          Create an OAuth 2.0 client at <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud Console</a>
+          (type: Web application, redirect URI: <code>http://localhost:3333/auth/google/callback</code>).
+          Enable <em>Google Calendar API</em> and <em>Gmail API</em> in the project.
+        </p>
+        <div class="settings-row"><label>Client ID</label><input id="cfg-google-id" type="text" placeholder="GOOGLE_CLIENT_ID" autocomplete="off" /></div>
+        <div class="settings-row"><label>Client Secret</label><input id="cfg-google-secret" type="password" placeholder="GOOGLE_CLIENT_SECRET" autocomplete="off" /></div>
+        <div id="settings-google-status" class="settings-google-status"></div>
+        <div class="settings-google-actions">
+          <button id="settings-google-connect" class="primary">Connect Google</button>
+          <button id="settings-google-disconnect">Disconnect</button>
+        </div>
+      </div>
+
+      <p class="muted small settings-note">
+        Leave a field blank to keep the value from <code>.env</code>. Saved values are stored in
+        <code>workpulse-config.json</code> (gitignored, takes precedence over .env).
+      </p>
+      <div id="settings-feedback" class="feedback"></div>
+      <div class="modal-foot">
+        <button id="settings-save" class="primary">Save</button>
       </div>
     </div>
   </div>

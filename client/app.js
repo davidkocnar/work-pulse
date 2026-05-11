@@ -9,7 +9,7 @@ const state = {
   // Selected day (YYYY-MM-DD) or null.
   selected: null,
   // Last fetched payload.
-  events: { github: [], slack: [] },
+  events: { github: [], slack: [], calendar: [] },
   // Per-day index built from events: { 'YYYY-MM-DD': { gh: n, sl: n } }
   dayIndex: {},
   // Mappings list.
@@ -24,6 +24,9 @@ const state = {
   favorites: loadFavorites(),
   loading: false,
 };
+
+// Active source filters for the day timeline (left/activity column only). Resets on reload.
+let timelineFilters = new Set(['github', 'slack', 'email']);
 
 const KIND_LABELS = {
   commit: 'commit',
@@ -40,6 +43,12 @@ const KIND_LABELS = {
   'issue-comment': 'issue comment',
   'branch-created': 'new branch',
   message: 'msg',
+  dm: 'dm',
+  mpim: 'group dm',
+  event: 'meeting',
+  'event-tentative': 'tentative',
+  'event-all-day': 'all day',
+  'email-sent': 'email',
 };
 
 // ---------- localStorage ----------
@@ -73,6 +82,31 @@ function localDay(iso) {
 function hhmm(iso) {
   const d = parseISO(iso);
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function timeToMinutesOfDay(timeStr) {
+  if (!timeStr) return 0;
+  const parts = timeStr.split(':');
+  return (parseInt(parts[0], 10) || 0) * 60 + (parseInt(parts[1], 10) || 0);
+}
+
+// Source-aware context label with # for Slack channels and highlighted repo for GitHub.
+function ctxHtml(source, repoOrChannel) {
+  const raw = repoOrChannel || '?';
+  if (source === 'slack') {
+    if (raw.startsWith('dm:')) return `<span class="ctx ctx-sl">↗ ${escapeHtml(raw.slice(3))}</span>`;
+    if (raw.startsWith('mpim:')) return `<span class="ctx ctx-sl">⊕ ${escapeHtml(raw.slice(5))}</span>`;
+    return `<span class="ctx ctx-sl"># ${escapeHtml(raw)}</span>`;
+  }
+  if (source === 'github') {
+    const slash = raw.lastIndexOf('/');
+    if (slash >= 0) {
+      return `<span class="ctx ctx-gh"><span class="ctx-org">${escapeHtml(raw.slice(0, slash + 1))}</span>${escapeHtml(raw.slice(slash + 1))}</span>`;
+    }
+    return `<span class="ctx ctx-gh">${escapeHtml(raw)}</span>`;
+  }
+  if (source === 'calendar') return `<span class="ctx ctx-cal">${escapeHtml(raw)}</span>`;
+  if (source === 'email')    return `<span class="ctx ctx-email">${escapeHtml(raw)}</span>`;
+  return `<span class="ctx">${escapeHtml(raw)}</span>`;
 }
 function monthName(year, month) {
   const d = new Date(year, month - 1, 1);
@@ -135,14 +169,10 @@ function projectFor(event) {
 
 function rebuildDayIndex() {
   const idx = {};
-  for (const e of state.events.github) {
-    const d = localDay(e.time);
-    (idx[d] ||= { gh: 0, sl: 0 }).gh++;
-  }
-  for (const e of state.events.slack) {
-    const d = localDay(e.time);
-    (idx[d] ||= { gh: 0, sl: 0 }).sl++;
-  }
+  const day = (e) => { const d = localDay(e.time); return (idx[d] ||= { gh: 0, sl: 0, em: 0 }); };
+  for (const e of state.events.github)           day(e).gh++;
+  for (const e of state.events.slack)            day(e).sl++;
+  for (const e of (state.events.email || []))    day(e).em++;
   state.dayIndex = idx;
 }
 
@@ -199,14 +229,19 @@ async function loadEvents({ refresh = false } = {}) {
   try {
     const url = `/api/events?year=${state.year}&month=${state.month}${refresh ? '&refresh=1' : ''}`;
     const data = await api(url);
-    state.events = { github: data.github || [], slack: data.slack || [] };
+    state.events = {
+      github:   data.github   || [],
+      slack:    data.slack    || [],
+      calendar: data.calendar || [],
+      email:    data.email    || [],
+    };
     rebuildDayIndex();
-    if (data.errors && (data.errors.github || data.errors.slack)) {
-      const msgs = [];
-      if (data.errors.github) msgs.push(`GitHub: ${data.errors.github}`);
-      if (data.errors.slack) msgs.push(`Slack: ${data.errors.slack}`);
-      toast(msgs.join(' · '), 'err');
-    }
+    const errMsgs = [];
+    if (data.errors?.github)   errMsgs.push(`GitHub: ${data.errors.github}`);
+    if (data.errors?.slack)    errMsgs.push(`Slack: ${data.errors.slack}`);
+    if (data.errors?.calendar) errMsgs.push(`Calendar: ${data.errors.calendar}`);
+    if (data.errors?.email)    errMsgs.push(`Gmail: ${data.errors.email}`);
+    if (errMsgs.length) toast(errMsgs.join(' · '), 'err');
   } finally {
     state.loading = false;
     renderStatusPill();
@@ -226,6 +261,7 @@ function renderStatusPill() {
   parts.push(`gh:${c.github ? '✓' : '✕'}`);
   parts.push(`sl:${c.slack ? '✓' : '✕'}`);
   parts.push(`tempo:${c.tempo ? '✓' : '✕'}`);
+  if (c.google) parts.push(`gcal:${state.health.googleConnected ? '✓' : '✕'}`);
   el.textContent = parts.join(' ');
   el.className = 'pill ' + (c.github || c.slack ? 'ok' : 'warn');
 }
@@ -284,6 +320,12 @@ function renderCalendar() {
         d.title = `${idx.sl} Slack message(s)`;
         dots.appendChild(d);
       }
+      if (idx.em) {
+        const d = document.createElement('i');
+        d.className = 'dot dot-email';
+        d.title = `${idx.em} sent email(s)`;
+        dots.appendChild(d);
+      }
       cell.appendChild(dots);
     }
     cell.addEventListener('click', () => selectDay(dStr));
@@ -306,14 +348,12 @@ function renderWeeklySummary() {
     logged[proj] = (logged[proj] || 0) + (parseInt(w.timeSpentSeconds, 10) || 0);
   }
 
-  // Local drafts by project
-  const drafts = {};
+  // Local drafts by day
+  const draftsByDay = {};
   for (const date of Object.keys(state.tempoByDay)) {
     if (!date.startsWith(monthPrefix)) continue;
-    for (const e of state.tempoByDay[date]) {
-      const proj = (e.issueKey || '').split('-')[0] || '?';
-      drafts[proj] = (drafts[proj] || 0) + (parseInt(e.timeSeconds, 10) || 0);
-    }
+    const total = state.tempoByDay[date].reduce((s, e) => s + (parseInt(e.timeSeconds, 10) || 0), 0);
+    if (total > 0) draftsByDay[date] = total;
   }
 
   const tempoConfigured = !!(state.health.config && state.health.config.tempo);
@@ -331,133 +371,979 @@ function renderWeeklySummary() {
     }
   }
 
-  const draftItems = Object.entries(drafts).sort((a, b) => b[1] - a[1]);
-  if (draftItems.length) {
-    const dt = draftItems.reduce((s, [, v]) => s + v, 0);
+  const draftDays = Object.entries(draftsByDay).sort(([a], [b]) => a.localeCompare(b));
+  if (draftDays.length) {
+    const dt = draftDays.reduce((s, [, v]) => s + v, 0);
     html += '<h4 style="margin-top:12px">Drafts (not sent)</h4>';
-    html += draftItems.map(([p, v]) => `<div class="row"><span class="proj-tag">${escapeHtml(p)}</span><span>${formatDuration(v)}</span></div>`).join('');
+    html += draftDays.map(([date, v]) => {
+      const [y, mo, d] = date.split('-').map(Number);
+      const label = new Date(y, mo - 1, d).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'numeric' });
+      return `<div class="row draft-day-row" data-day="${escapeHtml(date)}"><span>${escapeHtml(label)}</span><span>${formatDuration(v)}</span></div>`;
+    }).join('');
     html += `<div class="row total-row"><strong>Total</strong><strong>${formatDuration(dt)}</strong></div>`;
   } else if (!tempoConfigured) {
     html += '<h4>Drafts</h4><div class="muted">No drafts. Click events to add.</div>';
   }
 
   el.innerHTML = html;
+  for (const row of el.querySelectorAll('.draft-day-row[data-day]')) {
+    row.addEventListener('click', () => selectDay(row.dataset.day));
+  }
 }
 
 // ---------- rendering: day detail ----------
-function renderDay() {
-  const titleEl = document.getElementById('day-title');
-  const countsEl = document.getElementById('day-counts');
-  const content = document.getElementById('day-content');
 
-  if (!state.selected) {
-    titleEl.textContent = 'Select a day';
-    countsEl.textContent = '';
-    content.innerHTML = '<div class="empty">No day selected.</div>';
-    return;
+function buildDayTimeline(day) {
+  const items = [];
+  const counts = { github: 0, slack: 0, tempo: 0, calendar: 0, email: 0 };
+
+  for (const w of state.worklogs.filter((w) => w.startDate === day)) {
+    const t = (w.startTime || '').slice(0, 5) || '00:00';
+    items.push({
+      _type: 'worklog', sortKey: t, displayTime: t, source: 'tempo',
+      duration: parseInt(w.timeSpentSeconds, 10) || 0,
+      issueKey: w.issueKey, description: w.description || '', raw: w,
+    });
+    counts.tempo++;
+  }
+  for (const e of state.events.github.filter((e) => localDay(e.time) === day)) {
+    const t = hhmm(e.time);
+    items.push({
+      _type: 'event', sortKey: t, displayTime: t, source: 'github',
+      id: String(e.id), repoOrChannel: e.repoOrChannel, kind: e.kind,
+      title: e.title, url: e.url || null,
+      branch: e.branch || null, prNumber: e.prNumber || null, sha: e.sha || null, raw: e,
+    });
+    counts.github++;
+  }
+  for (const e of state.events.slack.filter((e) => localDay(e.time) === day)) {
+    const t = hhmm(e.time);
+    items.push({
+      _type: 'event', sortKey: t, displayTime: t, source: 'slack',
+      id: String(e.id), repoOrChannel: e.repoOrChannel, kind: e.kind,
+      title: e.title, url: e.url || null, raw: e,
+    });
+    counts.slack++;
+  }
+  for (const e of (state.events.calendar || []).filter((e) => localDay(e.time) === day)) {
+    const t = hhmm(e.time);
+    items.push({
+      _type: 'event', sortKey: t, displayTime: t, source: 'calendar',
+      id: String(e.id), repoOrChannel: e.repoOrChannel || '', kind: e.kind || 'event',
+      title: e.title, url: e.url || null, duration: e.duration || 0, raw: e,
+    });
+    counts.calendar++;
+  }
+  for (const e of (state.events.email || []).filter((e) => localDay(e.time) === day)) {
+    const t = hhmm(e.time);
+    items.push({
+      _type: 'event', sortKey: t, displayTime: t, source: 'email',
+      id: String(e.id), repoOrChannel: e.repoOrChannel || '', kind: e.kind || 'email-sent',
+      title: e.title, url: e.url || null, raw: e,
+    });
+    counts.email++;
   }
 
-  const day = state.selected;
-  titleEl.textContent = dayLong(day);
-  const ghDay = state.events.github.filter((e) => localDay(e.time) === day);
-  const slDay = state.events.slack.filter((e) => localDay(e.time) === day);
-  const dayWorklogs = state.worklogs.filter((w) => w.startDate === day);
-  const loggedTotal = dayWorklogs.reduce((s, w) => s + (parseInt(w.timeSpentSeconds, 10) || 0), 0);
+  items.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+  return { items, counts };
+}
 
-  const counts = [`${ghDay.length} GitHub`, `${slDay.length} Slack`];
-  if (dayWorklogs.length) counts.push(`${formatDuration(loggedTotal)} in Tempo`);
-  countsEl.textContent = counts.join(' · ');
+function renderFilterChips(counts) {
+  const sources = [
+    { key: 'github',   label: 'GH' },
+    { key: 'slack',    label: 'SL' },
+    ...(counts.email > 0 ? [{ key: 'email', label: 'Mail' }] : []),
+  ];
+  const chips = sources.map(({ key, label }) => {
+    const n = counts[key] || 0;
+    const active = timelineFilters.has(key) ? ' active' : '';
+    const disabled = n === 0 ? ' disabled' : '';
+    return `<button class="filter-chip ${key}${active}${disabled}" data-source="${key}">${escapeHtml(label)} <span class="chip-count">${n}</span></button>`;
+  });
+  return `<div class="filter-chips">${chips.join('')}</div>`;
+}
 
-  if (ghDay.length === 0 && slDay.length === 0 && dayWorklogs.length === 0) {
-    content.innerHTML = '<div class="empty">No activity recorded for this day.</div>';
-    return;
+function renderTimelineRow(item, addedSet) {
+  if (item._type === 'worklog') {
+    return `
+      <div class="event worklog" title="Logged in Tempo">
+        <span class="time">${escapeHtml(item.displayTime)}</span>
+        <span class="badge tempo">${formatDuration(item.duration)}</span>
+        <div>
+          <div class="title">${item.description ? escapeHtml(item.description) : '<span class="muted">(no description)</span>'}</div>
+          <div class="meta"><span class="ctx">${escapeHtml(item.issueKey || '')}</span></div>
+        </div>
+        <span class="proj has">${escapeHtml(item.issueKey || '—')}</span>
+      </div>`;
   }
 
-  const tempoEntries = state.tempoByDay[day] || [];
-  const addedSet = new Set(tempoEntries.flatMap((e) => e.sourceIds || []));
+  const added = addedSet.has(item.id);
+  const proj = projectFor(item.raw);
+  const kind = KIND_LABELS[item.kind] || item.kind;
+  const link = item.url ? ` <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">↗</a>` : '';
 
+  let loggedTag = '';
+  if (added) {
+    const entry = (state.tempoByDay[state.selected] || [])
+      .find((e) => (e.sourceIds || []).includes(item.id));
+    if (entry) {
+      loggedTag = `<span class="logged-tag">${escapeHtml(entry.issueKey || '?')} · ${formatDuration(entry.timeSeconds)}</span>`;
+    }
+  }
+
+  const meta = [];
+  if (item.source === 'email') {
+    meta.push(`<span class="ctx ctx-email">To: ${escapeHtml(item.repoOrChannel || '?')}</span>`);
+  } else {
+    meta.push(ctxHtml(item.source, item.repoOrChannel));
+    if (item.branch) meta.push(`<code>${escapeHtml(item.branch)}</code>`);
+    if (item.prNumber) meta.push(`#${item.prNumber}`);
+    if (item.sha) meta.push(`<code>${item.sha}</code>`);
+  }
+
+  return `
+    <div class="event${added ? ' added' : ''}" data-id="${item.id}" data-source="${item.source}" title="Click to add to Tempo log">
+      <span class="time">${escapeHtml(item.displayTime)}</span>
+      <span class="badge ${item.source}">${escapeHtml(kind)}</span>
+      <div>
+        <div class="title">${escapeHtml(item.title || '(no title)')}${link}${loggedTag}</div>
+        <div class="meta">${meta.join(' · ')}</div>
+      </div>
+      <span class="${proj ? 'proj has' : 'proj miss'}">${escapeHtml(proj || '?')}</span>
+    </div>`;
+}
+
+// ---------- Two-column day layout constants ----------
+const PX_PER_MIN   = 1.5;
+const GRID_START   = 9 * 60;   // 09:00
+const GRID_END     = 20 * 60;  // 20:00
+const EVENT_H      = 50;       // estimated px height of a normal event row (incl. gap)
+const COMPACT_H    = 38;       // estimated px height of a compact group row
+const TEMPO_COL_W  = 220;      // px width of right tempo column (44px labels + 172px blocks)
+
+// ---------- Event merging ----------
+const MERGE_GAP_MIN = 30;
+const MERGEABLE_SOURCES = new Set(['github', 'slack']);
+
+function mergeNearbyItems(items) {
+  const sorted = [...items].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+  const byKey  = new Map();
+  const result = [];
+
+  for (const item of sorted) {
+    if (!MERGEABLE_SOURCES.has(item.source)) { result.push(item); continue; }
+    const k = `${item.source}::${item.repoOrChannel || ''}`;
+    if (!byKey.has(k)) byKey.set(k, []);
+    byKey.get(k).push(item);
+  }
+
+  for (const [, keyItems] of byKey) {
+    let group = [keyItems[0]];
+    for (let i = 1; i < keyItems.length; i++) {
+      const gap = timeToMinutesOfDay(keyItems[i].displayTime) - timeToMinutesOfDay(group[group.length - 1].displayTime);
+      if (gap <= MERGE_GAP_MIN) {
+        group.push(keyItems[i]);
+      } else {
+        result.push(group.length === 1 ? group[0] : makeMergedItem(group));
+        group = [keyItems[i]];
+      }
+    }
+    result.push(group.length === 1 ? group[0] : makeMergedItem(group));
+  }
+
+  return result.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+}
+
+function makeMergedItem(items) {
+  const first = items[0];
+  const last  = items[items.length - 1];
+  const kindCounts = new Map();
+  for (const item of items) {
+    const k = KIND_LABELS[item.kind] || item.kind;
+    kindCounts.set(k, (kindCounts.get(k) || 0) + 1);
+  }
+  const kindSummary = [...kindCounts.entries()]
+    .map(([k, n]) => n > 1 ? `${n}× ${k}` : k).join(', ');
+  const timeRange  = first.displayTime === last.displayTime
+    ? first.displayTime : `${first.displayTime}–${last.displayTime}`;
+  const mergedId   = 'mg_' + Math.random().toString(36).slice(2, 9);
+  return {
+    _type: 'event', _group: items, _mergedId: mergedId,
+    _kindSummary: kindSummary, _timeRange: timeRange,
+    sortKey: first.sortKey, displayTime: first.displayTime,
+    source: first.source, repoOrChannel: first.repoOrChannel,
+    id: mergedId, kind: first.kind, title: `${items.length} events`, url: null, raw: first.raw,
+  };
+}
+
+// Build activity column layout: group events by minute, resolve overlaps.
+// Returns { positions: [{min, top, groups}], totalHeight }
+function buildActivityLayout(eventItems, startMin) {
+  const byMinute = new Map();
+  for (const item of eventItems) {
+    const min = timeToMinutesOfDay(item.displayTime);
+    if (!byMinute.has(min)) byMinute.set(min, []);
+    byMinute.get(min).push(item);
+  }
+
+  const sorted = [...byMinute.keys()].sort((a, b) => a - b);
+  const positions = [];
+  let currentBottom = 0;
+
+  for (const min of sorted) {
+    const items = byMinute.get(min);
+    const idealTop = (min - startMin) * PX_PER_MIN;
+    const actualTop = Math.max(idealTop, currentBottom);
+
+    // Group by repoOrChannel for compaction
+    const groupMap = new Map();
+    for (const item of items) {
+      const key = item.repoOrChannel || '?';
+      if (!groupMap.has(key)) groupMap.set(key, []);
+      groupMap.get(key).push(item);
+    }
+    const groups = [...groupMap.values()];
+
+    let bucketH = 4; // bottom gap
+    for (const g of groups) {
+      bucketH += g.length > 2 ? COMPACT_H : g.length * EVENT_H;
+    }
+
+    positions.push({ min, top: actualTop, groups });
+    currentBottom = actualTop + bucketH;
+  }
+
+  return { positions, totalHeight: currentBottom };
+}
+
+function renderActivityColumn(positions, addedSet) {
+  if (!positions.length) return '<div class="act-empty">No activity for the selected filters.</div>';
   let html = '';
-  if (dayWorklogs.length) {
-    html += `<div class="section-h">Logged in Tempo <span class="muted">· ${formatDuration(loggedTotal)}</span></div>`;
-    html += renderWorklogs(dayWorklogs);
+  for (const { top, groups } of positions) {
+    html += `<div class="act-bucket" style="top:${top}px">`;
+    for (const group of groups) {
+      for (const item of group) {
+        html += item._group ? renderMergedGroupRow(item, addedSet) : renderTimelineRow(item, addedSet);
+      }
+    }
+    html += '</div>';
   }
-  if (ghDay.length) {
-    html += '<div class="section-h">GitHub <span class="muted">· ' + ghDay.length + '</span></div>';
-    html += renderEventGroups(ghDay, 'gh', addedSet);
-  }
-  if (slDay.length) {
-    html += '<div class="section-h">Slack <span class="muted">· ' + slDay.length + '</span></div>';
-    html += renderEventGroups(slDay, 'sl', addedSet);
-  }
-  content.innerHTML = html;
+  return html;
+}
 
-  // Wire up clicks
-  for (const node of content.querySelectorAll('.event')) {
-    node.addEventListener('click', (e) => {
-      const id = node.dataset.id;
-      const src = node.dataset.source;
-      const ev = (src === 'gh' ? ghDay : slDay).find((x) => String(x.id) === id);
-      if (ev) addEventToTempo(ev);
+function renderCompactGroup(items, addedSet) {
+  const first = items[0];
+  const proj = projectFor(first.raw);
+  const anyAdded = items.some((i) => addedSet.has(i.id));
+
+  // Summarise kinds: "3× commit, approved"
+  const kindCounts = new Map();
+  for (const item of items) {
+    const k = KIND_LABELS[item.kind] || item.kind;
+    kindCounts.set(k, (kindCounts.get(k) || 0) + 1);
+  }
+  const kindSummary = [...kindCounts.entries()]
+    .map(([k, n]) => (n > 1 ? `${n}× ${k}` : k)).join(', ');
+
+  // Most common issue key from titles
+  const issueKeys = items.map((i) => extractIssueKey(i.title) || extractIssueKey(i.branch)).filter(Boolean);
+  const topKey = issueKeys.length ? issueKeys.sort((a, b) =>
+    issueKeys.filter((x) => x === b).length - issueKeys.filter((x) => x === a).length)[0] : null;
+
+  const ids = items.map((i) => i.id).join(',');
+
+  return `
+    <div class="event event-compact${anyAdded ? ' added' : ''}" data-compact-ids="${escapeHtml(ids)}" data-source="${first.source}" title="Click to add all to Tempo log">
+      <span class="time">${escapeHtml(first.displayTime)}</span>
+      <span class="badge ${first.source}">${escapeHtml(kindSummary)}</span>
+      <div>
+        <div class="title">${ctxHtml(first.source, first.repoOrChannel)}${topKey ? ` <span class="logged-tag" style="opacity:.7">${escapeHtml(topKey)}</span>` : ''}</div>
+        <div class="meta"><span class="cmp-count">${items.length} events</span></div>
+      </div>
+      <span class="${proj ? 'proj has' : 'proj miss'}">${escapeHtml(proj || '?')}</span>
+    </div>`;
+}
+
+function renderMergedGroupRow(item, addedSet) {
+  const anyAdded    = item._group.some((i) => addedSet.has(i.id));
+  const addedCount  = item._group.filter((i) => addedSet.has(i.id)).length;
+  const proj        = projectFor(item.raw);
+  const issueKeys   = item._group.map((i) => extractIssueKey(i.title) || extractIssueKey(i.branch)).filter(Boolean);
+  const topKey      = issueKeys.length ? issueKeys.sort((a, b) =>
+    issueKeys.filter((x) => x === b).length - issueKeys.filter((x) => x === a).length)[0] : null;
+  const countLabel  = addedCount > 0 ? `${addedCount}/${item._group.length}` : String(item._group.length);
+
+  return `
+    <div class="event event-merged${anyAdded ? ' added' : ''}" data-merged-id="${escapeHtml(item._mergedId)}" data-source="${item.source}">
+      <span class="time">${escapeHtml(item._timeRange)}</span>
+      <span class="badge ${item.source}">${escapeHtml(item._kindSummary)}</span>
+      <div>
+        <div class="title">${ctxHtml(item.source, item.repoOrChannel)}${topKey ? ` <span class="logged-tag" style="opacity:.7">${escapeHtml(topKey)}</span>` : ''}</div>
+        <div class="meta"><span class="cmp-count">${countLabel} events</span></div>
+      </div>
+      <span class="${proj ? 'proj has' : 'proj miss'}">${escapeHtml(proj || '?')}</span>
+    </div>`;
+}
+
+function addCompactGroupToTempo(rawEvents) {
+  if (!state.selected || !rawEvents.length) return;
+  const list = entriesForDay();
+  for (const ev of rawEvents) {
+    const proj = projectFor(ev);
+    const keyFromTitle = extractIssueKey(ev.title) || extractIssueKey(ev.branch);
+    const issueKey = keyFromTitle || (proj ? `${proj}-` : '');
+    const description = buildDescription(ev);
+    const existingIdx = list.findIndex((e) => e.issueKey && issueKey && e.issueKey === issueKey);
+    if (existingIdx >= 0) {
+      const e = list[existingIdx];
+      e.timeSeconds = (parseInt(e.timeSeconds, 10) || 0) + 15 * 60;
+      if (!e.description.includes(description)) {
+        e.description = e.description ? `${e.description}; ${description}` : description;
+      }
+      e.sourceIds = Array.from(new Set([...(e.sourceIds || []), String(ev.id)]));
+    } else {
+      list.push({ id: cryptoId(), issueKey, timeSeconds: 30 * 60, description, sourceIds: [String(ev.id)] });
+    }
+  }
+  saveTempo();
+  renderTempo();
+  renderDay();
+}
+
+function renderTimeGrid(startMin, endMin) {
+  let html = '';
+  const firstH = Math.max(Math.ceil(startMin / 60), GRID_START / 60);
+  const lastH  = Math.min(Math.floor(endMin / 60),  GRID_END  / 60);
+  for (let h = firstH; h <= lastH; h++) {
+    const top = (h * 60 - startMin) * PX_PER_MIN;
+    html += `<div class="tg-line" style="top:${top}px"></div>`;
+  }
+  return html;
+}
+
+function renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startMin, endMin) {
+  let html = '';
+  // Hour labels
+  const firstH = Math.max(Math.ceil(startMin / 60), GRID_START / 60);
+  const lastH  = Math.min(Math.floor(endMin / 60),  GRID_END  / 60);
+  for (let h = firstH; h <= lastH; h++) {
+    const top = (h * 60 - startMin) * PX_PER_MIN;
+    html += `<div class="tb-label" style="top:${top}px">${pad(h)}:00</div>`;
+  }
+  // Build set of meeting IDs already covered by a draft (to avoid double-rendering)
+  const meetingDraftMap = new Map(); // meetingId → draft entry
+  for (const e of (draftEntries || [])) {
+    for (const sid of (e.sourceIds || [])) {
+      if (calMeetings.some((m) => m.id === sid)) meetingDraftMap.set(sid, e);
+    }
+  }
+
+  // Meeting blocks (calendar events with duration, rendered behind worklog blocks)
+  for (const m of calMeetings) {
+    if (!m.duration || m.kind === 'event-all-day') continue;
+    if (meetingDraftMap.has(m.id)) continue; // shown as part of the draft block below
+    const startM   = timeToMinutesOfDay(m.displayTime);
+    const top      = (startM - startMin) * PX_PER_MIN;
+    const height   = Math.max(m.duration / 60 * PX_PER_MIN, 20);
+    const showTitle = height > 36;
+    html += `<div class="wb-meeting" data-meeting-id="${escapeHtml(m.id)}" style="top:${top}px;height:${height}px" title="${escapeHtml(m.title)}">
+      ${showTitle ? `<span class="wb-meeting-title">${escapeHtml(m.title.slice(0, 40))}</span>` : ''}
+      <span class="wb-dur">${formatDuration(m.duration)}</span>
+    </div>`;
+  }
+  // Real Tempo worklog blocks
+  for (const w of [...worklogs].sort((a, b) => a.displayTime.localeCompare(b.displayTime))) {
+    const startM   = timeToMinutesOfDay(w.displayTime);
+    const durMin   = w.duration / 60;
+    const top      = (startM - startMin) * PX_PER_MIN;
+    const height   = Math.max(durMin * PX_PER_MIN, 28);
+    const showDesc = height > 52 && w.description;
+    html += `<div class="wb-block" data-wl-id="${escapeHtml(String(w.raw?.id ?? ''))}" style="top:${top}px;height:${height}px">
+      <span class="wb-key">${escapeHtml(w.issueKey || '?')}</span>
+      <span class="wb-dur">${formatDuration(w.duration)}</span>
+      ${showDesc ? `<span class="wb-desc">${escapeHtml(w.description.slice(0, 60))}</span>` : ''}
+      <div class="wb-resize-handle"></div>
+    </div>`;
+  }
+  // Draft entries that have a startTime (created by drag-to-create or from a meeting)
+  for (const e of (draftEntries || []).filter((e) => e.startTime)) {
+    const startM      = timeToMinutesOfDay(e.startTime);
+    const top         = (startM - startMin) * PX_PER_MIN;
+    const height      = Math.max((parseInt(e.timeSeconds, 10) || 0) / 60 * PX_PER_MIN, 28);
+    const srcMeeting  = calMeetings.find((m) => (e.sourceIds || []).includes(m.id));
+    html += `<div class="wb-block wb-draft" data-draft-id="${escapeHtml(e.id)}" style="top:${top}px;height:${height}px">
+      ${srcMeeting ? `<span class="wb-meeting-title">${escapeHtml(srcMeeting.title.slice(0, 40))}</span>` : ''}
+      <span class="wb-key">${escapeHtml(e.issueKey || '…')}</span>
+      <span class="wb-dur">${formatDuration(parseInt(e.timeSeconds, 10) || 0)}</span>
+      <div class="wb-resize-handle"></div>
+    </div>`;
+  }
+  return html;
+}
+
+function pixelToTime(y, startMin) {
+  return Math.round(Math.max(0, Math.min(23 * 60 + 45, startMin + y / PX_PER_MIN)) / 15) * 15;
+}
+
+function wireTempoColumnDrag(colEl, startMin) {
+  const hoverLine = document.createElement('div');
+  hoverLine.className = 'tc-hover-line';
+  colEl.appendChild(hoverLine);
+
+  colEl.addEventListener('mousemove', (e) => {
+    if (e.buttons !== 0) return;
+    if (e.target.closest('.wb-block')) { hoverLine.style.display = 'none'; return; }
+    const y = e.clientY - colEl.getBoundingClientRect().top;
+    const t = pixelToTime(y, startMin);
+    hoverLine.dataset.time = `${pad(Math.floor(t / 60))}:${pad(t % 60)}`;
+    hoverLine.style.cssText = `display:block; top:${(t - startMin) * PX_PER_MIN}px`;
+  });
+
+  colEl.addEventListener('mouseleave', () => { hoverLine.style.display = 'none'; });
+
+  colEl.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.wb-block') || e.target.closest('.tb-label')) return;
+    if (e.button !== 0) return;
+    e.preventDefault();
+
+    const colRect   = colEl.getBoundingClientRect();
+    const rawY      = e.clientY - colRect.top;
+    const startTimeMin = pixelToTime(rawY, startMin);
+    const anchorY   = (startTimeMin - startMin) * PX_PER_MIN;
+
+    hoverLine.style.display = 'none';
+
+    const ghost = document.createElement('div');
+    ghost.className = 'wb-ghost';
+    ghost.style.cssText = `top:${anchorY}px; height:${Math.round(60 * PX_PER_MIN)}px`;
+    ghost.innerHTML = `<span class="wb-key">${pad(Math.floor(startTimeMin / 60))}:${pad(startTimeMin % 60)}</span><span class="wb-dur">1h</span>`;
+    colEl.appendChild(ghost);
+
+    const onMove = (ev) => {
+      const curY = ev.clientY - colRect.top;
+      const dy   = Math.max(curY - anchorY, 15 * PX_PER_MIN);
+      ghost.style.height = `${dy}px`;
+      const durMin = Math.max(15, Math.round(dy / PX_PER_MIN / 15) * 15);
+      ghost.querySelector('.wb-dur').textContent = formatDuration(durMin * 60);
+    };
+
+    const onUp = (ev) => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      ghost.remove();
+
+      const dy = ev.clientY - colRect.top - anchorY;
+      const durSeconds = dy < 10
+        ? 3600
+        : Math.max(15, Math.round(dy / PX_PER_MIN / 15) * 15) * 60;
+
+      entriesForDay().push({
+        id: cryptoId(),
+        issueKey: '',
+        timeSeconds: durSeconds,
+        description: '',
+        sourceIds: [],
+        startTime: `${pad(Math.floor(startTimeMin / 60))}:${pad(startTimeMin % 60)}:00`,
+      });
+      saveTempo();
+      renderTempo();
+      renderDay();
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  // Wire move + resize for real Tempo worklog blocks
+  for (const block of colEl.querySelectorAll('.wb-block:not(.wb-draft)[data-wl-id]')) {
+    const wlId = block.dataset.wlId;
+
+    block.querySelector('.wb-resize-handle').addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const startY      = e.clientY;
+      const startHeight = block.offsetHeight;
+
+      const onMove = (ev) => {
+        const newH   = Math.max(15 * PX_PER_MIN, startHeight + ev.clientY - startY);
+        const durMin = Math.max(15, Math.round(newH / PX_PER_MIN / 15) * 15);
+        block.style.height = `${durMin * PX_PER_MIN}px`;
+        block.querySelector('.wb-dur').textContent = formatDuration(durMin * 60);
+      };
+
+      const onUp = async (ev) => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        const newH     = Math.max(15 * PX_PER_MIN, startHeight + ev.clientY - startY);
+        const durMin   = Math.max(15, Math.round(newH / PX_PER_MIN / 15) * 15);
+        const newSec   = durMin * 60;
+        const wl       = state.worklogs.find((w) => String(w.id) === wlId);
+        if (!wl) return;
+        const oldSec   = wl.timeSpentSeconds;
+        wl.timeSpentSeconds = newSec;
+        block.classList.add('wb-saving');
+        try {
+          await api(`/api/tempo/worklog/${encodeURIComponent(wlId)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ issueId: wl.issueId, startDate: wl.startDate, startTime: wl.startTime, timeSeconds: newSec, description: wl.description }),
+          });
+          loadWorklogs({ refresh: true }).then(() => { renderWeeklySummary(); renderDay(); });
+        } catch (err) {
+          wl.timeSpentSeconds = oldSec;
+          renderDay();
+          toast(`Tempo update failed: ${err.message}`, 'err');
+        }
+      };
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    block.addEventListener('mousedown', (e) => {
+      if (e.target.closest('.wb-resize-handle')) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const colRect = colEl.getBoundingClientRect();
+      const offsetY = e.clientY - colRect.top - parseFloat(block.style.top || 0);
+
+      const onMove = (ev) => {
+        const t = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin);
+        block.style.top = `${(t - startMin) * PX_PER_MIN}px`;
+        block.querySelector('.wb-key').textContent = `${pad(Math.floor(t / 60))}:${pad(t % 60)}`;
+      };
+
+      const onUp = async (ev) => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        const t          = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin);
+        const newTime    = `${pad(Math.floor(t / 60))}:${pad(t % 60)}:00`;
+        const wl         = state.worklogs.find((w) => String(w.id) === wlId);
+        if (!wl) return;
+        const oldTime    = wl.startTime;
+        wl.startTime     = newTime;
+        block.classList.add('wb-saving');
+        try {
+          await api(`/api/tempo/worklog/${encodeURIComponent(wlId)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ issueId: wl.issueId, startDate: wl.startDate, startTime: newTime, timeSeconds: wl.timeSpentSeconds, description: wl.description }),
+          });
+          loadWorklogs({ refresh: true }).then(() => { renderWeeklySummary(); renderDay(); });
+        } catch (err) {
+          wl.startTime = oldTime;
+          renderDay();
+          toast(`Tempo update failed: ${err.message}`, 'err');
+        }
+      };
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+
+  // Wire move + resize for already-rendered draft blocks
+  for (const block of colEl.querySelectorAll('.wb-block.wb-draft[data-draft-id]')) {
+    const entryId = block.dataset.draftId;
+
+    // Resize — drag the bottom handle
+    block.querySelector('.wb-resize-handle').addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const entry = (state.tempoByDay[state.selected] || []).find((x) => x.id === entryId);
+      if (!entry) return;
+
+      const startY      = e.clientY;
+      const startHeight = block.offsetHeight;
+
+      const onMove = (ev) => {
+        const newH   = Math.max(15 * PX_PER_MIN, startHeight + ev.clientY - startY);
+        const durMin = Math.max(15, Math.round(newH / PX_PER_MIN / 15) * 15);
+        block.style.height = `${durMin * PX_PER_MIN}px`;
+        block.querySelector('.wb-dur').textContent = formatDuration(durMin * 60);
+      };
+
+      const onUp = (ev) => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        const newH   = Math.max(15 * PX_PER_MIN, startHeight + ev.clientY - startY);
+        const durMin = Math.max(15, Math.round(newH / PX_PER_MIN / 15) * 15);
+        entry.timeSeconds = durMin * 60;
+        saveTempo();
+        renderTempo();
+        renderDay();
+      };
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    // Move — drag the block body
+    block.addEventListener('mousedown', (e) => {
+      if (e.target.closest('.wb-resize-handle')) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const entry = (state.tempoByDay[state.selected] || []).find((x) => x.id === entryId);
+      if (!entry) return;
+
+      const colRect = colEl.getBoundingClientRect();
+      const offsetY = e.clientY - colRect.top - parseFloat(block.style.top || 0);
+
+      const onMove = (ev) => {
+        const t       = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin);
+        block.style.top = `${(t - startMin) * PX_PER_MIN}px`;
+        block.querySelector('.wb-key').textContent = `${pad(Math.floor(t / 60))}:${pad(t % 60)}`;
+      };
+
+      const onUp = (ev) => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        const t = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin);
+        entry.startTime = `${pad(Math.floor(t / 60))}:${pad(t % 60)}:00`;
+        saveTempo();
+        renderTempo();
+        renderDay();
+      };
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
     });
   }
 }
 
-function renderWorklogs(worklogs) {
-  // Sort by startTime ascending so the timeline reads naturally.
-  const sorted = worklogs.slice().sort((a, b) => (a.startTime || '').localeCompare(b.startTime || ''));
-  return sorted.map((w) => {
-    const time = (w.startTime || '').slice(0, 5) || '—';
-    const key = w.issueKey || `id:${w.issueId}`;
-    const desc = escapeHtml(w.description || '');
-    return `
-      <div class="event worklog" title="Already logged in Tempo">
-        <span class="time">${escapeHtml(time)}</span>
-        <span class="badge tempo">${formatDuration(w.timeSpentSeconds)}</span>
-        <div><div class="title">${desc || '<span class="muted">(no description)</span>'}</div></div>
-        <span class="proj has">${escapeHtml(key)}</span>
-      </div>
-    `;
-  }).join('');
-}
+// ---------- Compact group popup ----------
+function showCompactPopup(items, anchorEl, addedSet, allEvents, hoverMode = false) {
+  document.getElementById('compact-popup')?.remove();
 
-function renderEventGroups(events, badge, addedSet) {
-  // Group consecutive same-repo/channel events visually, but render each individually.
-  const groups = [];
-  let cur = null;
-  for (const e of events) {
-    if (!cur || cur.key !== e.repoOrChannel) {
-      cur = { key: e.repoOrChannel, items: [] };
-      groups.push(cur);
-    }
-    cur.items.push(e);
+  const first = items[0];
+  const popup = document.createElement('div');
+  popup.id = 'compact-popup';
+  popup.className = 'compact-popup';
+
+  let rows = '';
+  for (const item of items) {
+    const kind = KIND_LABELS[item.kind] || item.kind;
+    const added = addedSet.has(item.id);
+    rows += `<div class="cmpop-row${added ? ' added' : ''}" data-id="${item.id}">
+      <span class="cmpop-time">${escapeHtml(item.displayTime)}</span>
+      <span class="badge ${item.source}">${escapeHtml(kind)}</span>
+      <span class="cmpop-title">${escapeHtml(item.title || '(no title)')}</span>
+    </div>`;
   }
-  return groups.map((g) => {
-    const inner = g.items.map((e) => renderEvent(e, badge, addedSet)).join('');
-    return `<div class="repo-group"><div class="repo-label">${escapeHtml(g.key || '?')}</div>${inner}</div>`;
-  }).join('');
+
+  popup.innerHTML = `
+    <div class="cmpop-head">
+      ${ctxHtml(first.source, first.repoOrChannel)}
+      <button class="cmpop-close" id="cmpop-close">×</button>
+    </div>
+    <div class="cmpop-list">${rows}</div>
+    <div class="cmpop-foot">
+      <button id="cmpop-add-all" class="primary">Add all to Tempo</button>
+    </div>`;
+
+  // Position below anchor, clamped to viewport
+  const rect = anchorEl.getBoundingClientRect();
+  popup.style.left = `${Math.min(rect.left, window.innerWidth - 490)}px`;
+  popup.style.top  = `${Math.min(rect.bottom + 4, window.innerHeight - 440)}px`;
+
+  document.body.appendChild(popup);
+
+  if (hoverMode) {
+    let dismissTimer;
+    const scheduleHide = () => { dismissTimer = setTimeout(() => popup.remove(), 160); };
+    const cancelHide   = () => clearTimeout(dismissTimer);
+    anchorEl.addEventListener('mouseleave', scheduleHide);
+    popup.addEventListener('mouseenter', cancelHide);
+    popup.addEventListener('mouseleave', scheduleHide);
+  }
+
+  for (const row of popup.querySelectorAll('.cmpop-row')) {
+    row.addEventListener('click', () => {
+      const ev = allEvents.find((e) => String(e.id) === row.dataset.id);
+      if (ev) addEventToTempo(ev);
+      popup.remove();
+    });
+  }
+
+  popup.querySelector('#cmpop-add-all').addEventListener('click', () => {
+    const evs = items.map((i) => allEvents.find((e) => String(e.id) === i.id)).filter(Boolean);
+    if (evs.length) addCompactGroupToTempo(evs);
+    popup.remove();
+  });
+
+  popup.querySelector('#cmpop-close').addEventListener('click', () => popup.remove());
+
+  const onOutside = (e) => {
+    if (!popup.contains(e.target) && e.target !== anchorEl) {
+      popup.remove();
+      document.removeEventListener('click', onOutside, true);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', onOutside, true), 0);
+
+  const onEsc = (e) => {
+    if (e.key === 'Escape') { popup.remove(); document.removeEventListener('keydown', onEsc); }
+  };
+  document.addEventListener('keydown', onEsc);
 }
 
-function renderEvent(e, badge, addedSet) {
-  const proj = projectFor(e);
-  const projCls = proj ? 'proj has' : 'proj miss';
-  const projTxt = proj || '?';
-  const kind = KIND_LABELS[e.kind] || e.kind;
-  const title = escapeHtml(e.title || '(no title)');
-  const meta = [];
-  if (e.branch) meta.push(`<code>${escapeHtml(e.branch)}</code>`);
-  if (e.prNumber) meta.push(`#${e.prNumber}`);
-  if (e.sha) meta.push(`<code>${e.sha}</code>`);
-  const metaHtml = meta.length ? `<div class="meta">${meta.join(' · ')}</div>` : '';
-  const added = addedSet.has(String(e.id)) ? ' added' : '';
-  const link = e.url ? ` <a href="${e.url}" target="_blank" rel="noopener" onclick="event.stopPropagation()">↗</a>` : '';
-  return `
-    <div class="event${added}" data-id="${e.id}" data-source="${badge}" title="Click to add to Tempo log">
-      <span class="time">${hhmm(e.time)}</span>
-      <span class="badge ${badge}">${kind}</span>
-      <div><div class="title">${title}${link}</div>${metaHtml}</div>
-      <span class="${projCls}">${escapeHtml(projTxt)}</span>
-    </div>
-  `;
+// ---------- Issue autocomplete ----------
+let _issueDropdown = null;
+
+function closeIssueDropdown() {
+  _issueDropdown?.remove();
+  _issueDropdown = null;
+}
+
+function getRecentIssues(limit = 8) {
+  const byKey = new Map();
+  for (const w of state.worklogs) {
+    if (!w.issueKey) continue;
+    const cur = byKey.get(w.issueKey) || { issueKey: w.issueKey, count: 0, lastDate: '', lastDescription: '' };
+    cur.count++;
+    if (w.startDate > cur.lastDate) {
+      cur.lastDate = w.startDate;
+      cur.lastDescription = w.description || '';
+    }
+    byKey.set(w.issueKey, cur);
+  }
+  return [...byKey.values()]
+    .sort((a, b) => b.lastDate.localeCompare(a.lastDate) || b.count - a.count)
+    .slice(0, limit);
+}
+
+function showIssueDropdown(input, items, headerText) {
+  closeIssueDropdown();
+  if (!items.length) return;
+
+  const dd = document.createElement('div');
+  dd.className = 'issue-dropdown';
+  _issueDropdown = dd;
+
+  let html = `<div class="io-header">${escapeHtml(headerText)}</div>`;
+  for (const item of items) {
+    html += `<div class="io-item" data-key="${escapeHtml(item.issueKey)}">
+      <span class="io-key">${escapeHtml(item.issueKey)}</span>
+      <span class="io-info">${escapeHtml(item.lastDescription || '')}</span>
+    </div>`;
+  }
+  dd.innerHTML = html;
+
+  const rect = input.getBoundingClientRect();
+  dd.style.left     = `${rect.left}px`;
+  dd.style.top      = `${rect.bottom + 2}px`;
+  dd.style.minWidth = `${rect.width}px`;
+
+  document.body.appendChild(dd);
+
+  for (const row of dd.querySelectorAll('.io-item')) {
+    row.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      input.value = row.dataset.key;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      closeIssueDropdown();
+    });
+  }
+}
+
+function wireIssueInput(input, entry) {
+  let debounceTimer = null;
+  let activeIdx = -1;
+
+  function ddItems() {
+    return _issueDropdown ? [..._issueDropdown.querySelectorAll('.io-item')] : [];
+  }
+  function setActive(idx) {
+    ddItems().forEach((el, i) => el.classList.toggle('io-active', i === idx));
+    activeIdx = idx;
+  }
+
+  input.addEventListener('focus', () => {
+    if (input.value.trim().length < 2) {
+      const recent = getRecentIssues(8);
+      if (recent.length) showIssueDropdown(input, recent, 'Recent issues');
+    }
+  });
+
+  input.addEventListener('input', (e) => {
+    entry.issueKey = e.target.value.toUpperCase().trim();
+    saveTempo();
+    renderWeeklySummary();
+    activeIdx = -1;
+
+    const q = input.value.trim();
+    if (q.length < 2) {
+      const recent = getRecentIssues(8);
+      if (recent.length) showIssueDropdown(input, recent, 'Recent issues');
+      else closeIssueDropdown();
+      return;
+    }
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(async () => {
+      if (_issueDropdown) _issueDropdown.querySelector('.io-header').textContent = 'Searching…';
+      try {
+        const results = await api(`/api/jira/search?q=${encodeURIComponent(q)}`);
+        if (document.activeElement === input) {
+          showIssueDropdown(
+            input,
+            results.map((r) => ({ issueKey: r.key, lastDescription: r.summary || '' })),
+            'Search results',
+          );
+        }
+      } catch { closeIssueDropdown(); }
+    }, 300);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const items = ddItems();
+    if (!items.length) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min(activeIdx + 1, items.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(Math.max(activeIdx - 1, 0)); }
+    else if (e.key === 'Enter' && activeIdx >= 0) {
+      e.preventDefault();
+      const key = items[activeIdx].dataset.key;
+      input.value = key;
+      entry.issueKey = key;
+      saveTempo();
+      renderWeeklySummary();
+      closeIssueDropdown();
+    } else if (e.key === 'Escape') { closeIssueDropdown(); }
+  });
+
+  input.addEventListener('blur', () => setTimeout(closeIssueDropdown, 150));
+}
+
+function renderDay() {
+  const titleEl  = document.getElementById('day-title');
+  const countsEl = document.getElementById('day-counts');
+  const content  = document.getElementById('day-content');
+
+  if (!state.selected) {
+    titleEl.textContent = 'Select a day';
+    countsEl.innerHTML  = '';
+    const hoursElInit = document.getElementById('day-hours');
+    if (hoursElInit) hoursElInit.innerHTML = '';
+    content.innerHTML   = '<div class="empty">No day selected.</div>';
+    return;
+  }
+
+  titleEl.textContent = dayLong(state.selected);
+
+  const { items, counts } = buildDayTimeline(state.selected);
+  const worklogs    = items.filter((i) => i._type === 'worklog');
+  const loggedTotal = worklogs.reduce((s, w) => s + w.duration, 0);
+  countsEl.innerHTML = renderFilterChips(counts);
+
+  // Hours badge (top-right of day-head)
+  const hoursEl = document.getElementById('day-hours');
+  if (hoursEl) {
+    const TARGET = 8 * 3600;
+    if (!loggedTotal) {
+      hoursEl.className = 'day-hours-badge hours-none';
+      hoursEl.innerHTML = `<span class="day-hours-num">—</span><span class="day-hours-label">nothing logged</span>`;
+    } else {
+      const ok   = loggedTotal >= TARGET;
+      const diff = Math.abs(TARGET - loggedTotal);
+      hoursEl.className = `day-hours-badge ${ok ? 'hours-ok' : 'hours-warn'}`;
+      hoursEl.innerHTML = `<span class="day-hours-num">${formatDuration(loggedTotal)}</span>
+        <span class="day-hours-label">${ok ? '✓ on track' : `↓ ${formatDuration(diff)} short`}</span>`;
+    }
+  }
+
+  const tempoEntries = state.tempoByDay[state.selected] || [];
+  const addedSet = new Set(tempoEntries.flatMap((e) => e.sourceIds || []));
+
+  if (items.length === 0) {
+    content.innerHTML = '<div class="empty">No activity recorded for this day.</div>';
+    return;
+  }
+
+  // Calendar meetings shown in Tempo column regardless of filter state
+  const calMeetings = items.filter((i) => i._type === 'event' && i.source === 'calendar' && i.kind !== 'event-all-day' && i.duration > 0);
+
+  // Compute shared time range (at minimum 9:00–20:00)
+  let contentStart = GRID_START;
+  let contentEnd   = GRID_END;
+  for (const item of items) {
+    const min = timeToMinutesOfDay(item.displayTime);
+    if (min > 0) {
+      contentStart = Math.min(contentStart, Math.floor(min / 60) * 60);
+      const hasDuration = item._type === 'worklog' || (item.source === 'calendar' && item.duration > 0);
+      contentEnd = Math.max(contentEnd,
+        hasDuration
+          ? Math.ceil((min + item.duration / 60) / 60) * 60
+          : Math.ceil((min + 30) / 60) * 60);
+    }
+  }
+  const startMin = Math.min(contentStart, GRID_START);
+  const endMin   = Math.max(contentEnd,   GRID_END);
+
+  // Build activity column layout — merge nearby items in same source+channel first
+  const rawEventItems = items.filter((i) => i._type === 'event' && timelineFilters.has(i.source));
+  const eventItems    = mergeNearbyItems(rawEventItems);
+  const { positions, totalHeight: actH } = buildActivityLayout(eventItems, startMin);
+
+  const containerH = Math.max((endMin - startMin) * PX_PER_MIN, actH);
+
+  const draftEntries = state.tempoByDay[state.selected] || [];
+
+  content.innerHTML = `
+    <div class="day-two-col" style="height:${containerH}px">
+      <div class="day-time-grid">${renderTimeGrid(startMin, endMin)}</div>
+      <div class="day-activity-col">${renderActivityColumn(positions, addedSet)}</div>
+      <div class="day-tempo-col">${renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startMin, endMin)}</div>
+    </div>`;
+
+  wireTempoColumnDrag(content.querySelector('.day-tempo-col'), startMin);
+
+  // Wire individual event clicks
+  const allEvents = [
+    ...state.events.github.filter((e) => localDay(e.time) === state.selected),
+    ...state.events.slack.filter((e) => localDay(e.time) === state.selected),
+    ...(state.events.calendar || []).filter((e) => localDay(e.time) === state.selected),
+    ...(state.events.email    || []).filter((e) => localDay(e.time) === state.selected),
+  ];
+  for (const node of content.querySelectorAll('.event[data-id]')) {
+    node.addEventListener('click', () => {
+      const ev = allEvents.find((x) => String(x.id) === node.dataset.id);
+      if (ev) addEventToTempo(ev);
+    });
+  }
+
+  // Wire meeting block clicks → log matching duration + start time
+  for (const block of content.querySelectorAll('.wb-meeting[data-meeting-id]')) {
+    block.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const item = calMeetings.find((m) => m.id === block.dataset.meetingId);
+      if (item) addMeetingToTempo(item);
+    });
+  }
+
+  // Wire merged group hover → popup with individual items
+  const mergedGroupMap = new Map();
+  for (const item of eventItems) {
+    if (item._group) mergedGroupMap.set(item._mergedId, item);
+  }
+  let mergeHoverTimer;
+  for (const node of content.querySelectorAll('[data-merged-id]')) {
+    const mergedItem = mergedGroupMap.get(node.dataset.mergedId);
+    if (!mergedItem) continue;
+    node.addEventListener('mouseenter', () => {
+      clearTimeout(mergeHoverTimer);
+      mergeHoverTimer = setTimeout(() => {
+        document.getElementById('compact-popup')?.remove();
+        showCompactPopup(mergedItem._group, node, addedSet, allEvents, true);
+      }, 180);
+    });
+    node.addEventListener('mouseleave', () => clearTimeout(mergeHoverTimer));
+  }
+
+  // Wire filter chip clicks
+  for (const chip of countsEl.querySelectorAll('.filter-chip')) {
+    chip.addEventListener('click', () => {
+      const src = chip.dataset.source;
+      timelineFilters.has(src) ? timelineFilters.delete(src) : timelineFilters.add(src);
+      renderDay();
+    });
+  }
 }
 
 function escapeHtml(s) {
@@ -498,6 +1384,26 @@ function addEventToTempo(ev) {
       sourceIds: [String(ev.id)],
     });
   }
+  saveTempo();
+  renderTempo();
+  renderDay();
+}
+
+function addMeetingToTempo(item) {
+  if (!state.selected) return;
+  const list = entriesForDay();
+  if (list.some((e) => (e.sourceIds || []).includes(item.id))) return; // already added
+  const proj = projectFor(item.raw);
+  const keyFromTitle = extractIssueKey(item.title);
+  const issueKey = keyFromTitle || (proj ? `${proj}-` : '');
+  list.push({
+    id: cryptoId(),
+    issueKey,
+    timeSeconds: item.duration,
+    description: item.title || '',
+    sourceIds: [item.id],
+    startTime: item.displayTime + ':00',
+  });
   saveTempo();
   renderTempo();
   renderDay();
@@ -552,7 +1458,7 @@ function renderTempo() {
     li.dataset.id = entry.id;
     li.innerHTML = `
       <div class="tempo-row">
-        <input name="issue" placeholder="ISSUE-123" value="${escapeHtml(entry.issueKey)}" />
+        <div class="issue-wrap"><input name="issue" placeholder="ISSUE-123" value="${escapeHtml(entry.issueKey)}" autocomplete="off" /></div>
         <input name="time" placeholder="1h 30m" value="${formatDuration(entry.timeSeconds)}" />
         <button class="remove" title="Remove">×</button>
       </div>
@@ -560,11 +1466,7 @@ function renderTempo() {
         <textarea name="desc" rows="2" placeholder="Description">${escapeHtml(entry.description)}</textarea>
       </div>
     `;
-    li.querySelector('input[name="issue"]').addEventListener('input', (e) => {
-      entry.issueKey = e.target.value.toUpperCase().trim();
-      saveTempo();
-      renderWeeklySummary();
-    });
+    wireIssueInput(li.querySelector('input[name="issue"]'), entry);
     li.querySelector('input[name="time"]').addEventListener('change', (e) => {
       const sec = parseDuration(e.target.value);
       entry.timeSeconds = sec;
@@ -809,6 +1711,7 @@ async function sendTempo() {
           issueKey: e.issueKey,
           timeSeconds: e.timeSeconds,
           description: e.description,
+          startTime: e.startTime || null,
         })),
       }),
     });
@@ -822,8 +1725,8 @@ async function sendTempo() {
       saveTempo();
       renderTempo();
       renderDay();
-      // Refresh real worklogs so the summary updates.
-      loadWorklogs({ refresh: true }).then(renderWeeklySummary);
+      // Refresh real worklogs so the Tempo column and summary update.
+      loadWorklogs({ refresh: true }).then(() => { renderWeeklySummary(); renderDay(); });
     } else {
       const errs = res.results.filter((r) => !r.ok).map((r) => `${r.issueKey}: ${r.error}`).join(' · ');
       fb.textContent = `${ok} ok, ${fail} failed → ${errs}`;
@@ -831,6 +1734,81 @@ async function sendTempo() {
     }
   } catch (e) {
     fb.textContent = `Error: ${e.message}`;
+    fb.className = 'feedback err';
+  }
+}
+
+// ---------- Settings modal ----------
+function updateGoogleStatusUI() {
+  const statusEl      = document.getElementById('settings-google-status');
+  const connectBtn    = document.getElementById('settings-google-connect');
+  const disconnectBtn = document.getElementById('settings-google-disconnect');
+  if (!statusEl) return;
+  const configured = state.health.config?.google;
+  const connected  = state.health.googleConnected;
+  if (!configured) {
+    statusEl.textContent = 'Enter Client ID + Secret above, then save before connecting.';
+    statusEl.className = 'settings-google-status';
+  } else if (connected) {
+    statusEl.textContent = '✓ Connected';
+    statusEl.className = 'settings-google-status ok';
+  } else {
+    statusEl.textContent = 'Credentials saved — click Connect Google to authorize.';
+    statusEl.className = 'settings-google-status warn';
+  }
+  connectBtn.style.display    = connected ? 'none' : '';
+  disconnectBtn.style.display = connected ? ''     : 'none';
+}
+
+async function openSettings() {
+  document.getElementById('settings-modal').classList.remove('hidden');
+  document.getElementById('settings-feedback').textContent = '';
+  updateGoogleStatusUI();
+  try {
+    const cfg = await api('/api/config');
+    document.getElementById('cfg-github-username').value = cfg.GITHUB_USERNAME   || '';
+    document.getElementById('cfg-github-token').value    = cfg.GITHUB_TOKEN      || '';
+    document.getElementById('cfg-slack-token').value     = cfg.SLACK_TOKEN       || '';
+    document.getElementById('cfg-jira-url').value        = cfg.JIRA_BASE_URL     || '';
+    document.getElementById('cfg-jira-email').value      = cfg.JIRA_EMAIL        || '';
+    document.getElementById('cfg-jira-token').value      = cfg.JIRA_API_TOKEN    || '';
+    document.getElementById('cfg-tempo-token').value     = cfg.TEMPO_TOKEN       || '';
+    document.getElementById('cfg-google-id').value       = cfg.GOOGLE_CLIENT_ID  || '';
+    document.getElementById('cfg-google-secret').value   = cfg.GOOGLE_CLIENT_SECRET || '';
+  } catch (e) {
+    toast('Could not load config: ' + e.message, 'err');
+  }
+}
+
+function closeSettings() {
+  document.getElementById('settings-modal').classList.add('hidden');
+}
+
+async function saveSettings() {
+  const fb = document.getElementById('settings-feedback');
+  fb.textContent = 'Saving…';
+  fb.className = 'feedback';
+  try {
+    await api('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        GITHUB_USERNAME:     document.getElementById('cfg-github-username').value.trim(),
+        GITHUB_TOKEN:        document.getElementById('cfg-github-token').value.trim(),
+        SLACK_TOKEN:         document.getElementById('cfg-slack-token').value.trim(),
+        JIRA_BASE_URL:       document.getElementById('cfg-jira-url').value.trim(),
+        JIRA_EMAIL:          document.getElementById('cfg-jira-email').value.trim(),
+        JIRA_API_TOKEN:      document.getElementById('cfg-jira-token').value.trim(),
+        TEMPO_TOKEN:         document.getElementById('cfg-tempo-token').value.trim(),
+        GOOGLE_CLIENT_ID:    document.getElementById('cfg-google-id').value.trim(),
+        GOOGLE_CLIENT_SECRET:document.getElementById('cfg-google-secret').value.trim(),
+      }),
+    });
+    await loadHealth();
+    updateGoogleStatusUI();
+    fb.textContent = '✓ Saved';
+    fb.className = 'feedback ok';
+  } catch (e) {
+    fb.textContent = 'Error: ' + e.message;
     fb.className = 'feedback err';
   }
 }
@@ -987,6 +1965,19 @@ async function boot() {
     renderCalendar();
     renderDay();
   });
+  document.getElementById('settings-btn').addEventListener('click', openSettings);
+  document.getElementById('settings-close').addEventListener('click', closeSettings);
+  document.getElementById('settings-save').addEventListener('click', saveSettings);
+  document.getElementById('settings-google-connect').addEventListener('click', async () => {
+    await saveSettings();
+    window.location.href = '/auth/google';
+  });
+  document.getElementById('settings-google-disconnect').addEventListener('click', async () => {
+    await api('/auth/google/disconnect', { method: 'POST' });
+    await loadHealth();
+    updateGoogleStatusUI();
+    toast('Google disconnected.', 'ok');
+  });
   document.getElementById('mappings-btn').addEventListener('click', openMappings);
   document.getElementById('mappings-close').addEventListener('click', closeMappings);
   document.getElementById('favorites-btn').addEventListener('click', openFavorites);
@@ -1014,6 +2005,16 @@ async function boot() {
     else if (e.key === 'ArrowRight') { e.preventDefault(); shiftDay(1); }
     else if (e.key.toLowerCase() === 't') { e.preventDefault(); gotoToday(); }
   });
+
+  // Handle Google OAuth redirect params
+  const _sp = new URLSearchParams(window.location.search);
+  if (_sp.has('google')) {
+    toast('Google connected.', 'ok');
+    history.replaceState(null, '', window.location.pathname);
+  } else if (_sp.has('google_error')) {
+    toast('Google error: ' + _sp.get('google_error'), 'err');
+    history.replaceState(null, '', window.location.pathname);
+  }
 
   renderCalendar();
   renderDay();
