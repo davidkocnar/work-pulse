@@ -1,18 +1,52 @@
 {
   "name": "workpulse",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "description": "Local tool to review GitHub + Slack activity per day and build Tempo log entries",
-  "main": "server/index.js",
+  "main": "electron/main.js",
   "private": true,
   "type": "commonjs",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "electron": "electron .",
+    "dist": "electron-builder --mac --publish never",
+    "dist:win": "electron-builder --win --publish never"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
     "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "app.futured.workpulse",
+    "productName": "WorkPulse",
+    "files": [
+      "electron/**",
+      "server/**",
+      "client/**",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] }
+      ]
+    },
+    "dmg": {
+      "title": "WorkPulse ${version}"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    }
   }
 }

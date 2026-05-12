@@ -1,8 +1,9 @@
 const fs = require('fs');
 const path = require('path');
+const dataDir = require('./data-dir');
 
 const store = new Map();
-const persistFile = path.join(__dirname, '..', '.cache.json');
+const persistFile = path.join(dataDir(), '.cache.json');
 const persistKeys = new Set();
 
 try {

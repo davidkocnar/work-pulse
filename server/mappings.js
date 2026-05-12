@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
+const dataDir = require('./data-dir');
 
-const FILE = path.join(__dirname, '..', 'mappings.json');
+const FILE = path.join(dataDir(), 'mappings.json');
 
 function read() {
   try {

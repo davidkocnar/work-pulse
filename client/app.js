@@ -58,6 +58,8 @@ const KIND_LABELS = {
   mpim: 'group dm',
   event: 'meeting',
   'event-tentative': 'tentative',
+  'event-no-response': 'no response',
+  'event-declined': 'declined',
   'event-all-day': 'all day',
   'email-sent': 'email',
 };
@@ -311,7 +313,7 @@ function renderStatusPill() {
   parts.push(`gh:${c.github ? '✓' : '✕'}`);
   parts.push(`sl:${c.slack ? '✓' : '✕'}`);
   parts.push(`tempo:${c.tempo ? '✓' : '✕'}`);
-  if (c.google) parts.push(`gcal:${state.health.googleConnected ? '✓' : '✕'}`);
+  if (c.google) parts.push(`google:${state.health.googleConnected ? '✓' : '✕'}`);
   el.textContent = parts.join(' ');
   el.className = 'pill ' + (c.github || c.slack ? 'ok' : 'warn');
 }
@@ -515,7 +517,7 @@ function buildDayTimeline(day) {
     });
     counts.slack++;
   }
-  for (const e of (state.events.calendar || []).filter((e) => localDay(e.time) === day)) {
+  for (const e of (state.events.calendar || []).filter((e) => localDay(e.time) === day && e.kind !== 'event-declined')) {
     const t = hhmm(e.time);
     items.push({
       _type: 'event', sortKey: t, displayTime: t, source: 'calendar',
@@ -811,8 +813,8 @@ function addCompactGroupToTempo(rawEvents) {
 
 function renderTimeGrid(startMin, endMin, pxPerMin = PX_PER_MIN) {
   let html = '';
-  const firstH = Math.max(Math.ceil(startMin / 60), GRID_START / 60);
-  const lastH  = Math.min(Math.floor(endMin / 60),  GRID_END  / 60);
+  const firstH = Math.ceil(startMin / 60);
+  const lastH  = Math.floor(endMin / 60);
   for (let h = firstH; h <= lastH; h++) {
     const top = (h * 60 - startMin) * pxPerMin;
     html += `<div class="tg-line" style="top:${top}px"></div>`;
@@ -823,8 +825,8 @@ function renderTimeGrid(startMin, endMin, pxPerMin = PX_PER_MIN) {
 function renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startMin, endMin, pxPerMin = PX_PER_MIN) {
   let html = '';
   // Hour labels
-  const firstH = Math.max(Math.ceil(startMin / 60), GRID_START / 60);
-  const lastH  = Math.min(Math.floor(endMin / 60),  GRID_END  / 60);
+  const firstH = Math.ceil(startMin / 60);
+  const lastH  = Math.floor(endMin / 60);
   for (let h = firstH; h <= lastH; h++) {
     const top = (h * 60 - startMin) * pxPerMin;
     html += `<div class="tb-label" style="top:${top}px">${pad(h)}:00</div>`;
@@ -845,7 +847,8 @@ function renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startM
     const top      = (startM - startMin) * pxPerMin;
     const height   = Math.max(m.duration / 60 * pxPerMin, 20);
     const showTitle = height > 36;
-    html += `<div class="wb-meeting" data-meeting-id="${escapeHtml(m.id)}" style="top:${top}px;height:${height}px" title="${escapeHtml(m.title)}">
+    const meetingUncertain = m.kind === 'event-tentative' || m.kind === 'event-no-response';
+    html += `<div class="wb-meeting${meetingUncertain ? ' wb-meeting--uncertain' : ''}" data-meeting-id="${escapeHtml(m.id)}" style="top:${top}px;height:${height}px" title="${escapeHtml(m.title)}">
       ${showTitle ? `<span class="wb-meeting-title">${escapeHtml(m.title.slice(0, 40))}</span>` : ''}
       <span class="wb-dur">${formatDuration(m.duration)}</span>
     </div>`;
@@ -859,7 +862,7 @@ function renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startM
     const showDesc = height > 52 && w.description;
     const showDur  = height > 38;
     html += `<div class="wb-block" data-wl-id="${escapeHtml(String(w.raw?.id ?? ''))}" style="top:${top}px;height:${height}px">
-      <span class="wb-key">${escapeHtml(w.issueKey || '?')}</span>
+      <span class="wb-key"><span class="wb-logged-check">✓</span>${escapeHtml(w.issueKey || '?')}</span>
       ${showDur ? `<span class="wb-dur">${formatDuration(w.duration)}</span>` : ''}
       ${showDesc ? `<span class="wb-desc">${escapeHtml(w.description.slice(0, 60))}</span>` : ''}
       <div class="wb-block-actions">
@@ -1346,8 +1349,9 @@ function getRecentIssues(limit = 8) {
   const byKey = new Map();
   for (const w of state.worklogs) {
     if (!w.issueKey) continue;
-    const cur = byKey.get(w.issueKey) || { issueKey: w.issueKey, count: 0, lastDate: '', lastDescription: '' };
+    const cur = byKey.get(w.issueKey) || { issueKey: w.issueKey, summary: '', count: 0, lastDate: '', lastDescription: '' };
     cur.count++;
+    if (w.summary && !cur.summary) cur.summary = w.summary;
     if (w.startDate > cur.lastDate) {
       cur.lastDate = w.startDate;
       cur.lastDescription = w.description || '';
@@ -1556,7 +1560,7 @@ function renderDay() {
   if (actionsEl) {
     const pendingMeetings = (state.events.calendar || []).filter(
       (e) => localDay(e.time) === state.selected
-        && e.kind !== 'event-all-day' && (e.duration || 0) > 0
+        && e.kind !== 'event-all-day' && e.kind !== 'event-declined' && (e.duration || 0) > 0
         && !(state.tempoByDay[state.selected] || []).some((d) => (d.sourceIds || []).includes(String(e.id))),
     );
     if (pendingMeetings.length) {
@@ -1593,24 +1597,32 @@ function renderDay() {
   }
 
   // Calendar meetings shown in Tempo column regardless of filter state
-  const calMeetings = items.filter((i) => i._type === 'event' && i.source === 'calendar' && i.kind !== 'event-all-day' && i.duration > 0);
+  const _meetingPriority = (kind) => kind === 'event' ? 3 : (kind === 'event-tentative' || kind === 'event-no-response') ? 2 : 1;
+  const _rawMeetings = items.filter((i) => i._type === 'event' && i.source === 'calendar' && i.kind !== 'event-all-day' && i.kind !== 'event-declined' && i.duration > 0);
+  // For same start time keep only highest-priority meeting
+  const _byTime = new Map();
+  for (const m of _rawMeetings) {
+    const ex = _byTime.get(m.displayTime);
+    if (!ex || _meetingPriority(m.kind) > _meetingPriority(ex.kind)) _byTime.set(m.displayTime, m);
+  }
+  const calMeetings = [..._byTime.values()];
 
-  // Compute shared time range (at minimum 9:00–20:00)
-  let contentStart = GRID_START;
-  let contentEnd   = GRID_END;
+  // Compute time range: always 60min buffer before earliest and after latest event,
+  // but never narrower than the default 9:00–20:00 window.
+  let earliestMin = Infinity;
+  let latestMin   = 0;
   for (const item of items) {
     const min = timeToMinutesOfDay(item.displayTime);
     if (min > 0) {
-      contentStart = Math.min(contentStart, Math.floor(min / 60) * 60);
+      earliestMin = Math.min(earliestMin, min);
       const hasDuration = item._type === 'worklog' || (item.source === 'calendar' && item.duration > 0);
-      contentEnd = Math.max(contentEnd,
-        hasDuration
-          ? Math.ceil((min + item.duration / 60) / 60) * 60
-          : Math.ceil((min + 30) / 60) * 60);
+      latestMin = Math.max(latestMin, hasDuration ? min + item.duration / 60 : min + 30);
     }
   }
-  const startMin = Math.min(contentStart, GRID_START);
-  const endMin   = Math.max(contentEnd,   GRID_END);
+  if (earliestMin === Infinity) { earliestMin = GRID_START; latestMin = GRID_END; }
+  // min/max ensures we never go narrower than the default window
+  const startMin = Math.max(0,        Math.min(earliestMin - 60, GRID_START));
+  const endMin   = Math.min(24 * 60,  Math.max(latestMin   + 60, GRID_END));
 
   // Build two-lane bubble layout — merge nearby same-source items first, then assign lanes
   const rawEventItems = items.filter((i) => i._type === 'event' && timelineFilters.has(i.source));
@@ -1657,7 +1669,7 @@ function renderDay() {
   const allEvents = [
     ...state.events.github.filter((e) => localDay(e.time) === state.selected),
     ...state.events.slack.filter((e) => localDay(e.time) === state.selected),
-    ...(state.events.calendar || []).filter((e) => localDay(e.time) === state.selected),
+    ...(state.events.calendar || []).filter((e) => localDay(e.time) === state.selected && e.kind !== 'event-declined'),
     ...(state.events.email    || []).filter((e) => localDay(e.time) === state.selected),
   ];
   // Build a quick id→item map for hover tooltip lookups
@@ -1808,7 +1820,7 @@ function addMeetingToTempo(item) {
 
 function logAllMeetings(day) {
   const meetings = (state.events.calendar || []).filter(
-    (e) => localDay(e.time) === day && e.kind !== 'event-all-day' && (e.duration || 0) > 0,
+    (e) => localDay(e.time) === day && e.kind !== 'event-all-day' && e.kind !== 'event-declined' && (e.duration || 0) > 0,
   );
   if (!meetings.length) return;
   const list = state.tempoByDay[day] || (state.tempoByDay[day] = []);

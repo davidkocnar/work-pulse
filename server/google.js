@@ -1,8 +1,9 @@
 const fs   = require('fs');
 const path = require('path');
 const cache = require('./cache');
+const dataDir = require('./data-dir');
 
-const TOKENS_FILE = path.join(__dirname, '..', '.google-tokens.json');
+const TOKENS_FILE = path.join(dataDir(), '.google-tokens.json');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/calendar.readonly',
@@ -123,7 +124,11 @@ async function fetchCalendarEvents({ year, month, refresh }, env) {
       if (item.start?.dateTime) {
         time = item.start.dateTime;
         const self = (item.attendees || []).find((a) => a.self);
-        kind = self?.responseStatus === 'tentative' ? 'event-tentative' : 'event';
+        const rs = self?.responseStatus;
+        if (rs === 'declined') kind = 'event-declined';
+        else if (rs === 'tentative') kind = 'event-tentative';
+        else if (!self || rs === 'needsAction') kind = 'event-no-response';
+        else kind = 'event';
         if (item.end?.dateTime)
           duration = Math.round((new Date(item.end.dateTime) - new Date(item.start.dateTime)) / 1000);
       } else if (item.start?.date) {

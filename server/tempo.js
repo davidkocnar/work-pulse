@@ -69,6 +69,7 @@ async function resolveIssueKeysBulk(ids, env) {
       out[id] = issue.key;
       cache.persist(`jira:issueByid:${id}`, issue.key);
       cache.persist(`jira:issue:${issue.key}`, id);
+      if (issue.fields?.summary) cache.persist(`jira:summary:${issue.key}`, issue.fields.summary);
     }
   }
   return out;
@@ -76,17 +77,41 @@ async function resolveIssueKeysBulk(ids, env) {
 
 async function searchIssues(query, env) {
   if (!query || query.length < 2) return [];
-  const safe = query.replace(/"/g, '');
-  const jql = `text ~ "${safe}" OR key = "${safe.toUpperCase()}" ORDER BY updated DESC`;
+  const safe  = query.replace(/["\\/]/g, '').trim();
+  const upper = safe.toUpperCase();
+
+  // Detect whether it looks like a key or key prefix (letters, optional dash+digits)
+  const isKeyLike = /^[A-Z][A-Z0-9]*(-\d*)?$/.test(upper);
+
+  let jql;
+  if (isKeyLike) {
+    // Primary: key wildcard (FT → FTL-1, FTW-2, …), secondary: summary text
+    jql = `key ~ "${upper}*" OR summary ~ "${safe}" ORDER BY key ASC`;
+  } else {
+    jql = `summary ~ "${safe}" OR text ~ "${safe}" ORDER BY updated DESC`;
+  }
+
   const data = await jiraGet(
-    `/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&fields=summary,status&maxResults=10`,
+    `/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&fields=summary,status&maxResults=12`,
     env,
   );
-  return (data.issues || []).map((i) => ({
+  const results = (data.issues || []).map((i) => ({
     key: i.key,
     summary: (i.fields && i.fields.summary) || '',
     status: i.fields && i.fields.status && i.fields.status.name,
   }));
+
+  // When key-like query: sort so key-prefix matches come first, summary matches after
+  if (isKeyLike) {
+    results.sort((a, b) => {
+      const aKey = a.key.toUpperCase().startsWith(upper);
+      const bKey = b.key.toUpperCase().startsWith(upper);
+      if (aKey !== bKey) return aKey ? -1 : 1;
+      return a.key.localeCompare(b.key);
+    });
+  }
+
+  return results.slice(0, 10);
 }
 
 async function createWorklog({ issueKey, date, timeSeconds, description, startTime }, env) {
@@ -169,15 +194,19 @@ async function fetchWorklogsRange({ from, to }, env) {
     }
   }
 
-  const flat = all.map((w) => ({
-    id: w.tempoWorklogId || w.id,
-    issueId: w.issue && w.issue.id,
-    issueKey: keys[w.issue && w.issue.id] || null,
-    timeSpentSeconds: w.timeSpentSeconds,
-    startDate: w.startDate,
-    startTime: w.startTime,
-    description: w.description || '',
-  }));
+  const flat = all.map((w) => {
+    const issueKey = keys[w.issue && w.issue.id] || null;
+    return {
+      id: w.tempoWorklogId || w.id,
+      issueId: w.issue && w.issue.id,
+      issueKey,
+      summary: issueKey ? (cache.get(`jira:summary:${issueKey}`) || '') : '',
+      timeSpentSeconds: w.timeSpentSeconds,
+      startDate: w.startDate,
+      startTime: w.startTime,
+      description: w.description || '',
+    };
+  });
 
   cache.set(cacheKey, flat);
   return flat;

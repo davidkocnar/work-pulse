@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
+const dataDir = require('./data-dir');
 
-const FILE = path.join(__dirname, '..', 'workpulse-config.json');
+const FILE = path.join(dataDir(), 'workpulse-config.json');
 
 const ALLOWED = new Set([
   'GITHUB_TOKEN', 'GITHUB_USERNAME',
