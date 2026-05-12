@@ -15,7 +15,7 @@ function read() {
 
 function write(list) {
   if (!Array.isArray(list)) throw new Error('mappings must be an array');
-  const allowed = new Set(['github', 'slack', 'slack-dm']);
+  const allowed = new Set(['github', 'slack', 'slack-dm', 'calendar']);
   const cleaned = list
     .filter((m) => m && m.key && m.project && allowed.has(m.type))
     .map((m) => ({

@@ -19,6 +19,7 @@
       <button id="refresh-btn" title="Refresh from APIs">⟳ Refresh</button>
       <button id="mappings-btn" title="Project mappings">Mappings</button>
       <button id="settings-btn" title="Settings">⚙ Settings</button>
+      <button id="onboarding-btn" title="Setup guide">?</button>
       <span id="status-pill" class="pill">…</span>
     </div>
   </header>
@@ -40,7 +41,10 @@
           <h2 id="day-title">Select a day</h2>
           <div id="day-counts" class="filter-chips-bar"></div>
         </div>
-        <div id="day-hours" class="day-hours-badge"></div>
+        <div class="day-head-right">
+          <div id="day-actions" class="day-actions"></div>
+          <div id="day-hours" class="day-hours-badge"></div>
+        </div>
       </div>
       <div id="day-content" class="day-content">
         <div class="empty">No day selected.</div>
@@ -48,18 +52,21 @@
     </section>
 
     <aside class="tempo-panel">
-      <div class="tempo-head">
-        <h3>Tempo log</h3>
-        <span id="tempo-total" class="muted small"></span>
+      <div class="fav-section-head">
+        <span class="fav-section-label">Favorites</span>
+        <button id="favorites-btn" title="Manage favorites" class="fav-edit-btn">Edit</button>
       </div>
       <div id="favorites-bar" class="favorites-bar"></div>
+      <div class="tempo-head">
+        <h3>Tempo draft logs</h3>
+        <span id="tempo-total" class="muted small"></span>
+      </div>
       <ul id="tempo-list" class="tempo-list"></ul>
+      <div id="mapping-suggestion" class="mapping-suggestion hidden"></div>
       <div class="tempo-add">
         <button id="add-entry">+ Empty entry</button>
-        <button id="favorites-btn" title="Manage favorites">★ Favorites</button>
       </div>
       <div class="tempo-actions">
-        <button id="copy-btn">Copy</button>
         <button id="send-btn" class="primary">Send to Tempo</button>
       </div>
       <div id="tempo-feedback" class="feedback"></div>
@@ -74,10 +81,10 @@
       </div>
       <p class="muted small">
         Map a GitHub repo (<code>org/repo</code>), Slack channel (without <code>#</code>),
-        or Slack DM (the other person's display name) to a Jira project key.
+        or Slack DM (the other person's display name) to a Jira project key or issue.
       </p>
       <table class="mappings-table">
-        <thead><tr><th>Type</th><th>Key</th><th>Project</th><th></th></tr></thead>
+        <thead><tr><th>Type</th><th>Key</th><th>Project/issue</th><th></th></tr></thead>
         <tbody id="mappings-tbody"></tbody>
       </table>
       <button id="add-mapping">+ Add</button>
@@ -159,7 +166,19 @@
       </p>
       <div id="settings-feedback" class="feedback"></div>
       <div class="modal-foot">
+        <button id="settings-onboarding-btn" title="Re-run the setup guide">Setup guide</button>
         <button id="settings-save" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="onboarding-modal" class="modal hidden">
+    <div class="modal-card ob-card">
+      <div class="ob-progress" id="ob-progress"></div>
+      <div id="ob-body" class="ob-body"></div>
+      <div class="ob-nav">
+        <button id="ob-back" class="ob-back-btn">← Back</button>
+        <button id="ob-next" class="primary">Next →</button>
       </div>
     </div>
   </div>

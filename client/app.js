@@ -27,6 +27,17 @@ const state = {
 
 // Active source filters for the day timeline (left/activity column only). Resets on reload.
 let timelineFilters = new Set(['github', 'slack', 'email']);
+let nowLineTimer = null;
+
+const _issueTitleCache = (() => {
+  try { return new Map(JSON.parse(localStorage.getItem('workpulse:issueTitles') || '[]')); }
+  catch { return new Map(); }
+})();
+function cacheIssueTitle(key, title) {
+  if (!key || !title) return;
+  _issueTitleCache.set(key, title);
+  try { localStorage.setItem('workpulse:issueTitles', JSON.stringify([..._issueTitleCache])); } catch {}
+}
 
 const KIND_LABELS = {
   commit: 'commit',
@@ -90,19 +101,44 @@ function timeToMinutesOfDay(timeStr) {
 }
 
 // Source-aware context label with # for Slack channels and highlighted repo for GitHub.
+// Parse Slack MPIM (group DM) name into individual participant first-names.
+// Input: "mpdm-radekdolezal--david.kocnar--jakub.marek--miriam.cabadajova-1"
+function parseMpimNames(mpimRaw) {
+  let s = mpimRaw.startsWith('mpdm-') ? mpimRaw.slice(5) : mpimRaw;
+  s = s.replace(/-\d+$/, '');                         // strip trailing "-1" suffix
+  return s.split('--').filter(Boolean)
+    .map((n) => n.split('.')[0]);                      // first name only (before the dot)
+}
+
+function ctxShort(source, repoOrChannel) {
+  const raw = repoOrChannel || '';
+  if (source === 'github') {
+    const slash = raw.lastIndexOf('/');
+    return slash >= 0 ? raw.slice(slash + 1) : raw;
+  }
+  if (source === 'slack') {
+    if (raw.startsWith('dm:'))   return raw.slice(3);
+    if (raw.startsWith('mpim:')) return parseMpimNames(raw.slice(5)).join(', ');
+    return '#' + raw;
+  }
+  if (source === 'email') {
+    const at = raw.indexOf('@');
+    return at >= 0 ? raw.slice(0, at) : raw;
+  }
+  return raw;
+}
+
 function ctxHtml(source, repoOrChannel) {
   const raw = repoOrChannel || '?';
   if (source === 'slack') {
-    if (raw.startsWith('dm:')) return `<span class="ctx ctx-sl">↗ ${escapeHtml(raw.slice(3))}</span>`;
-    if (raw.startsWith('mpim:')) return `<span class="ctx ctx-sl">⊕ ${escapeHtml(raw.slice(5))}</span>`;
+    if (raw.startsWith('dm:'))   return `<span class="ctx ctx-sl">↗ ${escapeHtml(raw.slice(3))}</span>`;
+    if (raw.startsWith('mpim:')) return `<span class="ctx ctx-sl">⊕ ${escapeHtml(parseMpimNames(raw.slice(5)).join(', '))}</span>`;
     return `<span class="ctx ctx-sl"># ${escapeHtml(raw)}</span>`;
   }
   if (source === 'github') {
     const slash = raw.lastIndexOf('/');
-    if (slash >= 0) {
-      return `<span class="ctx ctx-gh"><span class="ctx-org">${escapeHtml(raw.slice(0, slash + 1))}</span>${escapeHtml(raw.slice(slash + 1))}</span>`;
-    }
-    return `<span class="ctx ctx-gh">${escapeHtml(raw)}</span>`;
+    const repo  = slash >= 0 ? raw.slice(slash + 1) : raw;
+    return `<span class="ctx ctx-gh">${escapeHtml(repo)}</span>`;
   }
   if (source === 'calendar') return `<span class="ctx ctx-cal">${escapeHtml(raw)}</span>`;
   if (source === 'email')    return `<span class="ctx ctx-email">${escapeHtml(raw)}</span>`;
@@ -164,7 +200,19 @@ function projectFor(event) {
     const m = state.mappings.find((x) => x.type === 'slack' && x.key.toLowerCase() === ch.toLowerCase());
     return m ? m.project : null;
   }
+  if (event.source === 'calendar') {
+    const title = (event.title || '').trim();
+    const m = state.mappings.find((x) => x.type === 'calendar' && x.key.toLowerCase() === title.toLowerCase());
+    return m ? m.project : null;
+  }
   return null;
+}
+
+// Returns full issue key if mapping holds one (e.g. "FTL-123"), else a "PROJ-" prefix, else ''.
+function issueKeyFromMapping(event) {
+  const mapped = projectFor(event);
+  if (!mapped) return '';
+  return /^[A-Z][A-Z0-9]+-\d+$/.test(mapped) ? mapped : `${mapped}-`;
 }
 
 function rebuildDayIndex() {
@@ -226,6 +274,8 @@ async function loadWorklogs({ refresh = false } = {}) {
 async function loadEvents({ refresh = false } = {}) {
   state.loading = true;
   renderStatusPill();
+  renderCalendar();
+  if (!state.selected) renderDay();
   try {
     const url = `/api/events?year=${state.year}&month=${state.month}${refresh ? '&refresh=1' : ''}`;
     const data = await api(url);
@@ -271,6 +321,7 @@ function renderCalendar() {
   document.getElementById('month-label').textContent = monthName(state.year, state.month);
   const cal = document.getElementById('calendar');
   cal.innerHTML = '';
+  cal.classList.toggle('cal-loading', state.loading);
 
   const grid = document.createElement('div');
   grid.className = 'cal-grid';
@@ -287,6 +338,16 @@ function renderCalendar() {
   const daysInMonth = new Date(state.year, state.month, 0).getDate();
   const todayStr = ymd(new Date());
 
+  // Draft / logged indicators for calendar cell borders
+  const draftDays = new Set(
+    Object.entries(state.tempoByDay).filter(([, e]) => e.length > 0).map(([d]) => d),
+  );
+  const loggedTotalByDay = new Map();
+  for (const w of state.worklogs) {
+    if (w.startDate) loggedTotalByDay.set(w.startDate, (loggedTotalByDay.get(w.startDate) || 0) + (parseInt(w.timeSpentSeconds, 10) || 0));
+  }
+  const loggedDays = new Set([...loggedTotalByDay.entries()].filter(([, s]) => s >= 8 * 3600).map(([d]) => d));
+
   // Leading outside days
   const prevMonthDays = new Date(state.year, state.month - 1, 0).getDate();
   for (let i = offset - 1; i >= 0; i--) {
@@ -300,8 +361,10 @@ function renderCalendar() {
     const cell = document.createElement('div');
     const dStr = `${state.year}-${pad(state.month)}-${pad(day)}`;
     cell.className = 'cal-day';
-    if (dStr === todayStr) cell.classList.add('today');
+    if (dStr === todayStr)      cell.classList.add('today');
     if (dStr === state.selected) cell.classList.add('selected');
+    if (loggedDays.has(dStr))  cell.classList.add('has-logged');
+    else if (draftDays.has(dStr)) cell.classList.add('has-draft');
     cell.textContent = String(day);
 
     const idx = state.dayIndex[dStr];
@@ -358,8 +421,35 @@ function renderWeeklySummary() {
 
   const tempoConfigured = !!(state.health.config && state.health.config.tempo);
 
+  // Week containing the selected day (falls back to today if none selected)
+  const ref = state.selected ? new Date(state.selected + 'T12:00:00') : new Date();
+  const dow = ref.getDay();
+  const monOffset = dow === 0 ? -6 : 1 - dow;
+  const monDate = new Date(ref); monDate.setDate(ref.getDate() + monOffset);
+  const weekStartStr = ymd(monDate);
+  const sunDate = new Date(monDate); sunDate.setDate(monDate.getDate() + 6);
+  const weekEndStr = ymd(sunDate);
+  const WEEKLY_TARGET = 40 * 3600;
+  let weekLogged = 0;
+  for (const w of state.worklogs) {
+    if (w.startDate >= weekStartStr && w.startDate <= weekEndStr)
+      weekLogged += parseInt(w.timeSpentSeconds, 10) || 0;
+  }
+  for (const [date, entries] of Object.entries(state.tempoByDay)) {
+    if (date >= weekStartStr && date <= weekEndStr)
+      weekLogged += entries.reduce((s, e) => s + (parseInt(e.timeSeconds, 10) || 0), 0);
+  }
+  const weekPct  = Math.min(100, Math.round(weekLogged / WEEKLY_TARGET * 100));
+  const weekOver = weekLogged > WEEKLY_TARGET;
+
   let html = '';
   if (tempoConfigured) {
+    const weekLabel = monDate.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+      + ' – ' + sunDate.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+    html += `<div class="week-progress">
+      <div class="week-progress-label"><span>${escapeHtml(weekLabel)}</span><span>${formatDuration(weekLogged)} / 40h</span></div>
+      <div class="week-progress-bar"><div class="week-progress-fill${weekOver ? ' over' : ''}" style="width:${weekPct}%"></div></div>
+    </div>`;
     const items = Object.entries(logged).sort((a, b) => b[1] - a[1]);
     const total = items.reduce((s, [, v]) => s + v, 0);
     html += '<h4>Logged in Tempo</h4>';
@@ -450,9 +540,9 @@ function buildDayTimeline(day) {
 
 function renderFilterChips(counts) {
   const sources = [
-    { key: 'github',   label: 'GH' },
-    { key: 'slack',    label: 'SL' },
-    ...(counts.email > 0 ? [{ key: 'email', label: 'Mail' }] : []),
+    ...(counts.github > 0 ? [{ key: 'github', label: 'GH' }]    : []),
+    ...(counts.slack  > 0 ? [{ key: 'slack',  label: 'Slack' }]  : []),
+    ...(counts.email  > 0 ? [{ key: 'email',  label: 'Mail' }]   : []),
   ];
   const chips = sources.map(({ key, label }) => {
     const n = counts[key] || 0;
@@ -520,6 +610,7 @@ const GRID_END     = 20 * 60;  // 20:00
 const EVENT_H      = 50;       // estimated px height of a normal event row (incl. gap)
 const COMPACT_H    = 38;       // estimated px height of a compact group row
 const TEMPO_COL_W  = 220;      // px width of right tempo column (44px labels + 172px blocks)
+const BUBBLE_H     = 28;       // px per bubble slot (26px visible + 2px gap)
 
 // ---------- Event merging ----------
 const MERGE_GAP_MIN = 30;
@@ -576,57 +667,65 @@ function makeMergedItem(items) {
   };
 }
 
-// Build activity column layout: group events by minute, resolve overlaps.
-// Returns { positions: [{min, top, groups}], totalHeight }
-function buildActivityLayout(eventItems, startMin) {
-  const byMinute = new Map();
-  for (const item of eventItems) {
-    const min = timeToMinutesOfDay(item.displayTime);
-    if (!byMinute.has(min)) byMinute.set(min, []);
-    byMinute.get(min).push(item);
-  }
+// Build two-lane bubble layout for the activity column.
+// Items at the same time go side-by-side (lane 0 / lane 1); overflow pushes into the less-full lane.
+// Returns { placements: [{item, top, lane}], totalHeight }
+function buildLaneLayout(items, startMin, pxPerMin) {
+  const sorted = [...items].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+  const laneBottom = [0, 0];
+  const placements = [];
 
-  const sorted = [...byMinute.keys()].sort((a, b) => a - b);
-  const positions = [];
-  let currentBottom = 0;
+  for (const item of sorted) {
+    const min      = timeToMinutesOfDay(item.displayTime);
+    const idealTop = (min - startMin) * pxPerMin;
+    let lane, top;
 
-  for (const min of sorted) {
-    const items = byMinute.get(min);
-    const idealTop = (min - startMin) * PX_PER_MIN;
-    const actualTop = Math.max(idealTop, currentBottom);
-
-    // Group by repoOrChannel for compaction
-    const groupMap = new Map();
-    for (const item of items) {
-      const key = item.repoOrChannel || '?';
-      if (!groupMap.has(key)) groupMap.set(key, []);
-      groupMap.get(key).push(item);
-    }
-    const groups = [...groupMap.values()];
-
-    let bucketH = 4; // bottom gap
-    for (const g of groups) {
-      bucketH += g.length > 2 ? COMPACT_H : g.length * EVENT_H;
+    if (idealTop >= laneBottom[0]) {
+      lane = 0; top = idealTop;
+    } else if (idealTop >= laneBottom[1]) {
+      lane = 1; top = idealTop;
+    } else {
+      lane = laneBottom[0] <= laneBottom[1] ? 0 : 1;
+      top  = laneBottom[lane];
     }
 
-    positions.push({ min, top: actualTop, groups });
-    currentBottom = actualTop + bucketH;
+    placements.push({ item, top, lane });
+    laneBottom[lane] = top + BUBBLE_H;
   }
 
-  return { positions, totalHeight: currentBottom };
+  return { placements, totalHeight: Math.max(laneBottom[0], laneBottom[1]) };
 }
 
-function renderActivityColumn(positions, addedSet) {
-  if (!positions.length) return '<div class="act-empty">No activity for the selected filters.</div>';
+function renderBubble(item, addedSet, posStyle) {
+  const added = item._group
+    ? item._group.some((i) => addedSet.has(i.id))
+    : addedSet.has(item.id);
+  const kindLabel = KIND_LABELS[item.kind] || item.kind;
+
+  if (item._mergedId) {
+    const addedCount = item._group.filter((i) => addedSet.has(i.id)).length;
+    const countLabel = addedCount > 0 ? `${addedCount}/${item._group.length}` : String(item._group.length);
+    return `<div class="event-bubble event-bubble-merged${added ? ' added' : ''}" data-merged-id="${escapeHtml(item._mergedId)}" data-source="${item.source}" style="${posStyle}"><span class="bub-badge ${item.source}">${escapeHtml(item._kindSummary.slice(0, 20))}</span><span class="bub-ctx-wrap bub-ctx-main">${ctxHtml(item.source, item.repoOrChannel)}</span><span class="bub-count">${escapeHtml(countLabel)}</span></div>`;
+  }
+
+  const proj     = projectFor(item.raw || item);
+  const issueKey = extractIssueKey(item.title) || extractIssueKey(item.branch);
+  const title    = item.title || item.repoOrChannel || '(no title)';
+  const suffix   = issueKey
+    ? `<span class="bub-key">${escapeHtml(issueKey)}</span>`
+    : proj ? `<span class="bub-proj">${escapeHtml(proj)}</span>` : '';
+
+  return `<div class="event-bubble${added ? ' added' : ''}" data-id="${escapeHtml(String(item.id))}" data-source="${item.source}" style="${posStyle}"><span class="bub-badge ${item.source}">${escapeHtml(kindLabel)}</span>${item.repoOrChannel ? `<span class="bub-ctx-wrap">${ctxHtml(item.source, item.repoOrChannel)}</span>` : ''}<span class="bub-title">${escapeHtml(title)}</span>${suffix}</div>`;
+}
+
+function renderLaneActivity(placements, addedSet) {
+  if (!placements.length) return '<div class="act-empty">No activity for the selected filters.</div>';
   let html = '';
-  for (const { top, groups } of positions) {
-    html += `<div class="act-bucket" style="top:${top}px">`;
-    for (const group of groups) {
-      for (const item of group) {
-        html += item._group ? renderMergedGroupRow(item, addedSet) : renderTimelineRow(item, addedSet);
-      }
-    }
-    html += '</div>';
+  for (const { item, top, lane } of placements) {
+    const posStyle = lane === 0
+      ? `top:${top}px;left:0;right:calc(50% + 2px);height:${BUBBLE_H - 2}px`
+      : `top:${top}px;left:calc(50% + 2px);right:0;height:${BUBBLE_H - 2}px`;
+    html += renderBubble(item, addedSet, posStyle);
   }
   return html;
 }
@@ -710,24 +809,24 @@ function addCompactGroupToTempo(rawEvents) {
   renderDay();
 }
 
-function renderTimeGrid(startMin, endMin) {
+function renderTimeGrid(startMin, endMin, pxPerMin = PX_PER_MIN) {
   let html = '';
   const firstH = Math.max(Math.ceil(startMin / 60), GRID_START / 60);
   const lastH  = Math.min(Math.floor(endMin / 60),  GRID_END  / 60);
   for (let h = firstH; h <= lastH; h++) {
-    const top = (h * 60 - startMin) * PX_PER_MIN;
+    const top = (h * 60 - startMin) * pxPerMin;
     html += `<div class="tg-line" style="top:${top}px"></div>`;
   }
   return html;
 }
 
-function renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startMin, endMin) {
+function renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startMin, endMin, pxPerMin = PX_PER_MIN) {
   let html = '';
   // Hour labels
   const firstH = Math.max(Math.ceil(startMin / 60), GRID_START / 60);
   const lastH  = Math.min(Math.floor(endMin / 60),  GRID_END  / 60);
   for (let h = firstH; h <= lastH; h++) {
-    const top = (h * 60 - startMin) * PX_PER_MIN;
+    const top = (h * 60 - startMin) * pxPerMin;
     html += `<div class="tb-label" style="top:${top}px">${pad(h)}:00</div>`;
   }
   // Build set of meeting IDs already covered by a draft (to avoid double-rendering)
@@ -743,8 +842,8 @@ function renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startM
     if (!m.duration || m.kind === 'event-all-day') continue;
     if (meetingDraftMap.has(m.id)) continue; // shown as part of the draft block below
     const startM   = timeToMinutesOfDay(m.displayTime);
-    const top      = (startM - startMin) * PX_PER_MIN;
-    const height   = Math.max(m.duration / 60 * PX_PER_MIN, 20);
+    const top      = (startM - startMin) * pxPerMin;
+    const height   = Math.max(m.duration / 60 * pxPerMin, 20);
     const showTitle = height > 36;
     html += `<div class="wb-meeting" data-meeting-id="${escapeHtml(m.id)}" style="top:${top}px;height:${height}px" title="${escapeHtml(m.title)}">
       ${showTitle ? `<span class="wb-meeting-title">${escapeHtml(m.title.slice(0, 40))}</span>` : ''}
@@ -755,21 +854,26 @@ function renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startM
   for (const w of [...worklogs].sort((a, b) => a.displayTime.localeCompare(b.displayTime))) {
     const startM   = timeToMinutesOfDay(w.displayTime);
     const durMin   = w.duration / 60;
-    const top      = (startM - startMin) * PX_PER_MIN;
-    const height   = Math.max(durMin * PX_PER_MIN, 28);
+    const top      = (startM - startMin) * pxPerMin;
+    const height   = Math.max(durMin * pxPerMin, 28);
     const showDesc = height > 52 && w.description;
+    const showDur  = height > 38;
     html += `<div class="wb-block" data-wl-id="${escapeHtml(String(w.raw?.id ?? ''))}" style="top:${top}px;height:${height}px">
       <span class="wb-key">${escapeHtml(w.issueKey || '?')}</span>
-      <span class="wb-dur">${formatDuration(w.duration)}</span>
+      ${showDur ? `<span class="wb-dur">${formatDuration(w.duration)}</span>` : ''}
       ${showDesc ? `<span class="wb-desc">${escapeHtml(w.description.slice(0, 60))}</span>` : ''}
+      <div class="wb-block-actions">
+        <button class="wb-btn-edit" title="Edit description">✎</button>
+        <button class="wb-btn-del" title="Delete">×</button>
+      </div>
       <div class="wb-resize-handle"></div>
     </div>`;
   }
   // Draft entries that have a startTime (created by drag-to-create or from a meeting)
   for (const e of (draftEntries || []).filter((e) => e.startTime)) {
     const startM      = timeToMinutesOfDay(e.startTime);
-    const top         = (startM - startMin) * PX_PER_MIN;
-    const height      = Math.max((parseInt(e.timeSeconds, 10) || 0) / 60 * PX_PER_MIN, 28);
+    const top         = (startM - startMin) * pxPerMin;
+    const height      = Math.max((parseInt(e.timeSeconds, 10) || 0) / 60 * pxPerMin, 28);
     const srcMeeting  = calMeetings.find((m) => (e.sourceIds || []).includes(m.id));
     html += `<div class="wb-block wb-draft" data-draft-id="${escapeHtml(e.id)}" style="top:${top}px;height:${height}px">
       ${srcMeeting ? `<span class="wb-meeting-title">${escapeHtml(srcMeeting.title.slice(0, 40))}</span>` : ''}
@@ -781,11 +885,70 @@ function renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startM
   return html;
 }
 
-function pixelToTime(y, startMin) {
-  return Math.round(Math.max(0, Math.min(23 * 60 + 45, startMin + y / PX_PER_MIN)) / 15) * 15;
+function showWorklogEditPopup(wl, anchorEl) {
+  document.getElementById('wl-edit-popup')?.remove();
+  const popup = document.createElement('div');
+  popup.id = 'wl-edit-popup';
+  popup.className = 'wl-edit-popup';
+  popup.innerHTML = `
+    <div class="wl-ep-row">
+      <label>Issue key</label>
+      <input class="wl-ep-key" value="${escapeHtml(wl.issueKey || '')}" placeholder="ABC-123" style="text-transform:uppercase;font-family:'JetBrains Mono',monospace" />
+    </div>
+    <div class="wl-ep-row">
+      <label>Description</label>
+      <textarea class="wl-ep-desc" rows="3">${escapeHtml(wl.description || '')}</textarea>
+    </div>
+    <div class="wl-ep-foot">
+      <button class="wl-ep-cancel">Cancel</button>
+      <button class="wl-ep-save primary">Save</button>
+    </div>`;
+
+  const rect = anchorEl.getBoundingClientRect();
+  const left = Math.min(rect.right + 8, window.innerWidth - 290);
+  popup.style.left = `${Math.max(8, left)}px`;
+  popup.style.top  = `${Math.min(rect.top, window.innerHeight - 200)}px`;
+  document.body.appendChild(popup);
+  popup.querySelector('.wl-ep-key').focus();
+
+  popup.querySelector('.wl-ep-cancel').addEventListener('click', () => popup.remove());
+
+  popup.querySelector('.wl-ep-save').addEventListener('click', async () => {
+    const issueKey    = popup.querySelector('.wl-ep-key').value.trim().toUpperCase();
+    const description = popup.querySelector('.wl-ep-desc').value;
+    const saveBtn = popup.querySelector('.wl-ep-save');
+    saveBtn.disabled = true;
+    try {
+      const body = { startDate: wl.startDate, startTime: wl.startTime, timeSeconds: wl.timeSpentSeconds, description, currentIssueId: wl.issueId };
+      if (issueKey) body.issueKey = issueKey;
+      else body.issueId = wl.issueId;
+      await api(`/api/tempo/worklog/${encodeURIComponent(wl.id)}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      });
+      popup.remove();
+      await loadWorklogs({ refresh: true });
+      renderWeeklySummary();
+      renderDay();
+      toast('Worklog updated');
+    } catch (e) {
+      toast(`Update failed: ${e.message}`, 'err');
+      saveBtn.disabled = false;
+    }
+  });
+
+  // Dismiss on outside click
+  const onOutside = (e) => {
+    if (!popup.contains(e.target)) { popup.remove(); document.removeEventListener('click', onOutside, true); }
+  };
+  setTimeout(() => document.addEventListener('click', onOutside, true), 0);
 }
 
-function wireTempoColumnDrag(colEl, startMin) {
+function pixelToTime(y, startMin, pxPerMin = PX_PER_MIN) {
+  return Math.round(Math.max(0, Math.min(23 * 60 + 45, startMin + y / pxPerMin)) / 15) * 15;
+}
+
+function wireTempoColumnDrag(colEl, startMin, pxPerMin = PX_PER_MIN) {
   const hoverLine = document.createElement('div');
   hoverLine.className = 'tc-hover-line';
   colEl.appendChild(hoverLine);
@@ -794,36 +957,36 @@ function wireTempoColumnDrag(colEl, startMin) {
     if (e.buttons !== 0) return;
     if (e.target.closest('.wb-block')) { hoverLine.style.display = 'none'; return; }
     const y = e.clientY - colEl.getBoundingClientRect().top;
-    const t = pixelToTime(y, startMin);
+    const t = pixelToTime(y, startMin, pxPerMin);
     hoverLine.dataset.time = `${pad(Math.floor(t / 60))}:${pad(t % 60)}`;
-    hoverLine.style.cssText = `display:block; top:${(t - startMin) * PX_PER_MIN}px`;
+    hoverLine.style.cssText = `display:block; top:${(t - startMin) * pxPerMin}px`;
   });
 
   colEl.addEventListener('mouseleave', () => { hoverLine.style.display = 'none'; });
 
   colEl.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.wb-block') || e.target.closest('.tb-label')) return;
+    if (e.target.closest('.wb-block') || e.target.closest('.wb-meeting') || e.target.closest('.tb-label')) return;
     if (e.button !== 0) return;
     e.preventDefault();
 
     const colRect   = colEl.getBoundingClientRect();
     const rawY      = e.clientY - colRect.top;
-    const startTimeMin = pixelToTime(rawY, startMin);
-    const anchorY   = (startTimeMin - startMin) * PX_PER_MIN;
+    const startTimeMin = pixelToTime(rawY, startMin, pxPerMin);
+    const anchorY   = (startTimeMin - startMin) * pxPerMin;
 
     hoverLine.style.display = 'none';
 
     const ghost = document.createElement('div');
     ghost.className = 'wb-ghost';
-    ghost.style.cssText = `top:${anchorY}px; height:${Math.round(60 * PX_PER_MIN)}px`;
+    ghost.style.cssText = `top:${anchorY}px; height:${Math.round(60 * pxPerMin)}px`;
     ghost.innerHTML = `<span class="wb-key">${pad(Math.floor(startTimeMin / 60))}:${pad(startTimeMin % 60)}</span><span class="wb-dur">1h</span>`;
     colEl.appendChild(ghost);
 
     const onMove = (ev) => {
       const curY = ev.clientY - colRect.top;
-      const dy   = Math.max(curY - anchorY, 15 * PX_PER_MIN);
+      const dy   = Math.max(curY - anchorY, 15 * pxPerMin);
       ghost.style.height = `${dy}px`;
-      const durMin = Math.max(15, Math.round(dy / PX_PER_MIN / 15) * 15);
+      const durMin = Math.max(15, Math.round(dy / pxPerMin / 15) * 15);
       ghost.querySelector('.wb-dur').textContent = formatDuration(durMin * 60);
     };
 
@@ -835,7 +998,7 @@ function wireTempoColumnDrag(colEl, startMin) {
       const dy = ev.clientY - colRect.top - anchorY;
       const durSeconds = dy < 10
         ? 3600
-        : Math.max(15, Math.round(dy / PX_PER_MIN / 15) * 15) * 60;
+        : Math.max(15, Math.round(dy / pxPerMin / 15) * 15) * 60;
 
       entriesForDay().push({
         id: cryptoId(),
@@ -865,17 +1028,17 @@ function wireTempoColumnDrag(colEl, startMin) {
       const startHeight = block.offsetHeight;
 
       const onMove = (ev) => {
-        const newH   = Math.max(15 * PX_PER_MIN, startHeight + ev.clientY - startY);
-        const durMin = Math.max(15, Math.round(newH / PX_PER_MIN / 15) * 15);
-        block.style.height = `${durMin * PX_PER_MIN}px`;
+        const newH   = Math.max(15 * pxPerMin, startHeight + ev.clientY - startY);
+        const durMin = Math.max(15, Math.round(newH / pxPerMin / 15) * 15);
+        block.style.height = `${durMin * pxPerMin}px`;
         block.querySelector('.wb-dur').textContent = formatDuration(durMin * 60);
       };
 
       const onUp = async (ev) => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
-        const newH     = Math.max(15 * PX_PER_MIN, startHeight + ev.clientY - startY);
-        const durMin   = Math.max(15, Math.round(newH / PX_PER_MIN / 15) * 15);
+        const newH     = Math.max(15 * pxPerMin, startHeight + ev.clientY - startY);
+        const durMin   = Math.max(15, Math.round(newH / pxPerMin / 15) * 15);
         const newSec   = durMin * 60;
         const wl       = state.worklogs.find((w) => String(w.id) === wlId);
         if (!wl) return;
@@ -907,15 +1070,15 @@ function wireTempoColumnDrag(colEl, startMin) {
       const offsetY = e.clientY - colRect.top - parseFloat(block.style.top || 0);
 
       const onMove = (ev) => {
-        const t = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin);
-        block.style.top = `${(t - startMin) * PX_PER_MIN}px`;
+        const t = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin, pxPerMin);
+        block.style.top = `${(t - startMin) * pxPerMin}px`;
         block.querySelector('.wb-key').textContent = `${pad(Math.floor(t / 60))}:${pad(t % 60)}`;
       };
 
       const onUp = async (ev) => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
-        const t          = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin);
+        const t          = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin, pxPerMin);
         const newTime    = `${pad(Math.floor(t / 60))}:${pad(t % 60)}:00`;
         const wl         = state.worklogs.find((w) => String(w.id) === wlId);
         if (!wl) return;
@@ -938,6 +1101,31 @@ function wireTempoColumnDrag(colEl, startMin) {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
+
+    // Edit button → popup (stopPropagation so drag doesn't fire)
+    block.querySelector('.wb-btn-edit')?.addEventListener('mousedown', (e) => e.stopPropagation());
+    block.querySelector('.wb-btn-edit')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wl = state.worklogs.find((w) => String(w.id) === wlId);
+      if (wl) showWorklogEditPopup(wl, block);
+    });
+
+    // Delete button
+    block.querySelector('.wb-btn-del')?.addEventListener('mousedown', (e) => e.stopPropagation());
+    block.querySelector('.wb-btn-del')?.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const wl = state.worklogs.find((w) => String(w.id) === wlId);
+      if (!confirm(`Delete "${wl?.description || wl?.issueKey || 'worklog'}" from Tempo?`)) return;
+      try {
+        await api(`/api/tempo/worklog/${encodeURIComponent(wlId)}`, { method: 'DELETE' });
+        await loadWorklogs({ refresh: true });
+        renderWeeklySummary();
+        renderDay();
+        toast('Worklog deleted');
+      } catch (err) {
+        toast(`Delete failed: ${err.message}`, 'err');
+      }
+    });
   }
 
   // Wire move + resize for already-rendered draft blocks
@@ -955,17 +1143,17 @@ function wireTempoColumnDrag(colEl, startMin) {
       const startHeight = block.offsetHeight;
 
       const onMove = (ev) => {
-        const newH   = Math.max(15 * PX_PER_MIN, startHeight + ev.clientY - startY);
-        const durMin = Math.max(15, Math.round(newH / PX_PER_MIN / 15) * 15);
-        block.style.height = `${durMin * PX_PER_MIN}px`;
+        const newH   = Math.max(15 * pxPerMin, startHeight + ev.clientY - startY);
+        const durMin = Math.max(15, Math.round(newH / pxPerMin / 15) * 15);
+        block.style.height = `${durMin * pxPerMin}px`;
         block.querySelector('.wb-dur').textContent = formatDuration(durMin * 60);
       };
 
       const onUp = (ev) => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
-        const newH   = Math.max(15 * PX_PER_MIN, startHeight + ev.clientY - startY);
-        const durMin = Math.max(15, Math.round(newH / PX_PER_MIN / 15) * 15);
+        const newH   = Math.max(15 * pxPerMin, startHeight + ev.clientY - startY);
+        const durMin = Math.max(15, Math.round(newH / pxPerMin / 15) * 15);
         entry.timeSeconds = durMin * 60;
         saveTempo();
         renderTempo();
@@ -988,15 +1176,15 @@ function wireTempoColumnDrag(colEl, startMin) {
       const offsetY = e.clientY - colRect.top - parseFloat(block.style.top || 0);
 
       const onMove = (ev) => {
-        const t       = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin);
-        block.style.top = `${(t - startMin) * PX_PER_MIN}px`;
+        const t       = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin, pxPerMin);
+        block.style.top = `${(t - startMin) * pxPerMin}px`;
         block.querySelector('.wb-key').textContent = `${pad(Math.floor(t / 60))}:${pad(t % 60)}`;
       };
 
       const onUp = (ev) => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
-        const t = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin);
+        const t = pixelToTime(Math.max(0, ev.clientY - colRect.top - offsetY), startMin, pxPerMin);
         entry.startTime = `${pad(Math.floor(t / 60))}:${pad(t % 60)}:00`;
         saveTempo();
         renderTempo();
@@ -1007,6 +1195,55 @@ function wireTempoColumnDrag(colEl, startMin) {
       document.addEventListener('mouseup', onUp);
     });
   }
+}
+
+// ---------- Single-bubble hover tooltip ----------
+function showBubbleTooltip(item, anchorEl, addedSet, allEvents) {
+  document.getElementById('bub-tooltip')?.remove();
+
+  const added     = addedSet.has(item.id);
+  const kindLabel = KIND_LABELS[item.kind] || item.kind;
+
+  const metaParts = [];
+  if (item.branch)   metaParts.push(`<code>${escapeHtml(item.branch)}</code>`);
+  if (item.prNumber) metaParts.push(`#${item.prNumber}`);
+  if (item.sha)      metaParts.push(`<code>${escapeHtml(item.sha)}</code>`);
+
+  const popup = document.createElement('div');
+  popup.id = 'bub-tooltip';
+  popup.className = 'bub-tooltip';
+  popup.innerHTML = `
+    <div class="bub-tt-head">
+      ${ctxHtml(item.source, item.repoOrChannel)}
+      <span class="bub-tt-time">${escapeHtml(item.displayTime)}</span>
+      <span class="badge ${item.source}">${escapeHtml(kindLabel)}</span>
+    </div>
+    <div class="bub-tt-body">${escapeHtml(item.title || '(no title)')}</div>
+    ${metaParts.length ? `<div class="bub-tt-meta">${metaParts.join(' · ')}</div>` : ''}
+    ${item.url ? `<div class="bub-tt-meta"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Open ↗</a></div>` : ''}
+    <div class="bub-tt-foot">${added ? '✓ Added to Tempo' : 'Click to add to Tempo'}</div>`;
+
+  const rect = anchorEl.getBoundingClientRect();
+  const popW = 280;
+  let left = rect.right + 6;
+  if (left + popW > window.innerWidth - 8) left = rect.left - popW - 6;
+  popup.style.left = `${Math.max(8, left)}px`;
+  popup.style.top  = `${Math.min(rect.top, window.innerHeight - 240)}px`;
+  document.body.appendChild(popup);
+
+  let dismissTimer;
+  const scheduleHide = () => { dismissTimer = setTimeout(() => popup.remove(), 160); };
+  const cancelHide   = () => clearTimeout(dismissTimer);
+  anchorEl.addEventListener('mouseleave', scheduleHide);
+  popup.addEventListener('mouseenter', cancelHide);
+  popup.addEventListener('mouseleave', scheduleHide);
+
+  popup.addEventListener('click', (e) => {
+    if (e.target.tagName === 'A') return;
+    const ev = allEvents.find((x) => String(x.id) === String(item.id));
+    if (ev) addEventToTempo(ev);
+    popup.remove();
+  });
 }
 
 // ---------- Compact group popup ----------
@@ -1055,12 +1292,24 @@ function showCompactPopup(items, anchorEl, addedSet, allEvents, hoverMode = fals
     popup.addEventListener('mouseleave', scheduleHide);
   }
 
+  let rowHoverTimer;
   for (const row of popup.querySelectorAll('.cmpop-row')) {
     row.addEventListener('click', () => {
       const ev = allEvents.find((e) => String(e.id) === row.dataset.id);
       if (ev) addEventToTempo(ev);
       popup.remove();
     });
+    const rowItem = items.find((i) => String(i.id) === row.dataset.id);
+    if (rowItem) {
+      row.addEventListener('mouseenter', () => {
+        clearTimeout(rowHoverTimer);
+        rowHoverTimer = setTimeout(() => {
+          document.getElementById('bub-tooltip')?.remove();
+          showBubbleTooltip(rowItem, row, addedSet, allEvents);
+        }, 200);
+      });
+      row.addEventListener('mouseleave', () => clearTimeout(rowHoverTimer));
+    }
   }
 
   popup.querySelector('#cmpop-add-all').addEventListener('click', () => {
@@ -1120,9 +1369,10 @@ function showIssueDropdown(input, items, headerText) {
 
   let html = `<div class="io-header">${escapeHtml(headerText)}</div>`;
   for (const item of items) {
+    const title = item.summary || _issueTitleCache.get(item.issueKey) || item.lastDescription || '';
     html += `<div class="io-item" data-key="${escapeHtml(item.issueKey)}">
       <span class="io-key">${escapeHtml(item.issueKey)}</span>
-      <span class="io-info">${escapeHtml(item.lastDescription || '')}</span>
+      <span class="io-title">${escapeHtml(title)}</span>
     </div>`;
   }
   dd.innerHTML = html;
@@ -1137,7 +1387,10 @@ function showIssueDropdown(input, items, headerText) {
   for (const row of dd.querySelectorAll('.io-item')) {
     row.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      input.value = row.dataset.key;
+      const key = row.dataset.key;
+      const titleText = row.querySelector('.io-title')?.textContent?.trim();
+      if (titleText) cacheIssueTitle(key, titleText);
+      input.value = key;
       input.dispatchEvent(new Event('input', { bubbles: true }));
       closeIssueDropdown();
     });
@@ -1163,10 +1416,17 @@ function wireIssueInput(input, entry) {
     }
   });
 
+  function updateValidation() {
+    const val = entry.issueKey;
+    const invalid = val.length > 0 && !/^[A-Z][A-Z0-9]*(-\d*)?$/.test(val);
+    input.classList.toggle('issue-invalid', invalid);
+  }
+
   input.addEventListener('input', (e) => {
     entry.issueKey = e.target.value.toUpperCase().trim();
     saveTempo();
     renderWeeklySummary();
+    updateValidation();
     activeIdx = -1;
 
     const q = input.value.trim();
@@ -1181,10 +1441,11 @@ function wireIssueInput(input, entry) {
       if (_issueDropdown) _issueDropdown.querySelector('.io-header').textContent = 'Searching…';
       try {
         const results = await api(`/api/jira/search?q=${encodeURIComponent(q)}`);
+        for (const r of results) if (r.summary) cacheIssueTitle(r.key, r.summary);
         if (document.activeElement === input) {
           showIssueDropdown(
             input,
-            results.map((r) => ({ issueKey: r.key, lastDescription: r.summary || '' })),
+            results.map((r) => ({ issueKey: r.key, summary: r.summary || '' })),
             'Search results',
           );
         }
@@ -1200,10 +1461,13 @@ function wireIssueInput(input, entry) {
     else if (e.key === 'Enter' && activeIdx >= 0) {
       e.preventDefault();
       const key = items[activeIdx].dataset.key;
+      const titleText = items[activeIdx].querySelector('.io-title')?.textContent?.trim();
+      if (titleText) cacheIssueTitle(key, titleText);
       input.value = key;
       entry.issueKey = key;
       saveTempo();
       renderWeeklySummary();
+      updateValidation();
       closeIssueDropdown();
     } else if (e.key === 'Escape') { closeIssueDropdown(); }
   });
@@ -1211,17 +1475,73 @@ function wireIssueInput(input, entry) {
   input.addEventListener('blur', () => setTimeout(closeIssueDropdown, 150));
 }
 
+function renderDaySkeleton() {
+  // Skeleton bubbles in two lanes mimicking the real layout
+  const bubbles = [
+    { top: 20,  lane: 0, delay: 0 },
+    { top: 20,  lane: 1, delay: 120 },
+    { top: 62,  lane: 0, delay: 240 },
+    { top: 100, lane: 1, delay: 80 },
+    { top: 130, lane: 0, delay: 360 },
+    { top: 130, lane: 1, delay: 200 },
+    { top: 172, lane: 0, delay: 480 },
+    { top: 210, lane: 1, delay: 160 },
+    { top: 248, lane: 0, delay: 320 },
+    { top: 280, lane: 0, delay: 560 },
+    { top: 280, lane: 1, delay: 440 },
+    { top: 318, lane: 1, delay: 600 },
+  ];
+  const wlBlocks = [
+    { top: 30,  h: 55,  delay: 0 },
+    { top: 130, h: 40,  delay: 220 },
+    { top: 228, h: 75,  delay: 110 },
+    { top: 355, h: 48,  delay: 330 },
+  ];
+
+  let bHtml = '';
+  for (const b of bubbles) {
+    const side = b.lane === 0
+      ? 'left:0;right:calc(50% + 2px)'
+      : 'left:calc(50% + 2px);right:0';
+    bHtml += `<div class="sk-bubble" style="${side};top:${b.top}px;animation-delay:-${b.delay}ms"></div>`;
+  }
+
+  let wHtml = '';
+  for (const w of wlBlocks) {
+    wHtml += `<div class="sk-wlblock" style="top:${w.top}px;height:${w.h}px;animation-delay:-${w.delay}ms"></div>`;
+  }
+
+  let gridHtml = '';
+  let hourHtml = '';
+  for (let h = 9; h <= 16; h++) {
+    const top = (h - 9) * 52;
+    gridHtml += `<div class="sk-gridline" style="top:${top}px"></div>`;
+    hourHtml += `<div class="sk-hour-lbl" style="top:${top}px">${pad(h)}:00</div>`;
+  }
+
+  return `<div class="day-skeleton">
+    <div class="sk-gridlines">${gridHtml}</div>
+    <div class="sk-act">${bHtml}</div>
+    <div class="sk-tempo-col">${hourHtml}${wHtml}</div>
+  </div>`;
+}
+
 function renderDay() {
-  const titleEl  = document.getElementById('day-title');
-  const countsEl = document.getElementById('day-counts');
-  const content  = document.getElementById('day-content');
+  clearInterval(nowLineTimer);
+  nowLineTimer = null;
+
+  const titleEl   = document.getElementById('day-title');
+  const countsEl  = document.getElementById('day-counts');
+  const actionsEl = document.getElementById('day-actions');
+  const content   = document.getElementById('day-content');
 
   if (!state.selected) {
-    titleEl.textContent = 'Select a day';
+    titleEl.textContent = state.loading ? '…' : 'Select a day';
     countsEl.innerHTML  = '';
+    if (actionsEl) actionsEl.innerHTML = '';
     const hoursElInit = document.getElementById('day-hours');
     if (hoursElInit) hoursElInit.innerHTML = '';
-    content.innerHTML   = '<div class="empty">No day selected.</div>';
+    content.innerHTML = state.loading ? renderDaySkeleton() : '<div class="empty">No day selected.</div>';
     return;
   }
 
@@ -1231,6 +1551,22 @@ function renderDay() {
   const worklogs    = items.filter((i) => i._type === 'worklog');
   const loggedTotal = worklogs.reduce((s, w) => s + w.duration, 0);
   countsEl.innerHTML = renderFilterChips(counts);
+
+  // "Log all meetings" button — only shown when there are pending (not-yet-drafted) meetings
+  if (actionsEl) {
+    const pendingMeetings = (state.events.calendar || []).filter(
+      (e) => localDay(e.time) === state.selected
+        && e.kind !== 'event-all-day' && (e.duration || 0) > 0
+        && !(state.tempoByDay[state.selected] || []).some((d) => (d.sourceIds || []).includes(String(e.id))),
+    );
+    if (pendingMeetings.length) {
+      const n = pendingMeetings.length;
+      actionsEl.innerHTML = `<button class="log-meetings-btn">📅 Log ${n} meeting${n > 1 ? 's' : ''}</button>`;
+      actionsEl.querySelector('.log-meetings-btn').addEventListener('click', () => logAllMeetings(state.selected));
+    } else {
+      actionsEl.innerHTML = '';
+    }
+  }
 
   // Hours badge (top-right of day-head)
   const hoursEl = document.getElementById('day-hours');
@@ -1276,23 +1612,46 @@ function renderDay() {
   const startMin = Math.min(contentStart, GRID_START);
   const endMin   = Math.max(contentEnd,   GRID_END);
 
-  // Build activity column layout — merge nearby items in same source+channel first
+  // Build two-lane bubble layout — merge nearby same-source items first, then assign lanes
   const rawEventItems = items.filter((i) => i._type === 'event' && timelineFilters.has(i.source));
   const eventItems    = mergeNearbyItems(rawEventItems);
-  const { positions, totalHeight: actH } = buildActivityLayout(eventItems, startMin);
-
-  const containerH = Math.max((endMin - startMin) * PX_PER_MIN, actH);
+  const naturalH      = (endMin - startMin) * PX_PER_MIN;
+  const { placements: rawPlacements, totalHeight: actH } = buildLaneLayout(eventItems, startMin, PX_PER_MIN);
+  const scale         = actH > naturalH ? actH / naturalH : 1;
+  const effPxPerMin   = PX_PER_MIN * scale;
+  const { placements } = scale > 1
+    ? buildLaneLayout(eventItems, startMin, effPxPerMin)
+    : { placements: rawPlacements };
+  const containerH    = (endMin - startMin) * effPxPerMin;
 
   const draftEntries = state.tempoByDay[state.selected] || [];
 
   content.innerHTML = `
     <div class="day-two-col" style="height:${containerH}px">
-      <div class="day-time-grid">${renderTimeGrid(startMin, endMin)}</div>
-      <div class="day-activity-col">${renderActivityColumn(positions, addedSet)}</div>
-      <div class="day-tempo-col">${renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startMin, endMin)}</div>
+      <div class="day-time-grid">${renderTimeGrid(startMin, endMin, effPxPerMin)}</div>
+      <div class="day-activity-col">${renderLaneActivity(placements, addedSet)}</div>
+      <div class="day-tempo-col">${renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startMin, endMin, effPxPerMin)}</div>
     </div>`;
 
-  wireTempoColumnDrag(content.querySelector('.day-tempo-col'), startMin);
+  wireTempoColumnDrag(content.querySelector('.day-tempo-col'), startMin, effPxPerMin);
+
+  // Now-line — only on today
+  const twoCol = content.querySelector('.day-two-col');
+  if (twoCol && state.selected === ymd(new Date())) {
+    const placeNowLine = () => {
+      const now = new Date();
+      const nowMin = now.getHours() * 60 + now.getMinutes();
+      let line = twoCol.querySelector('.now-line');
+      if (!line) {
+        line = document.createElement('div');
+        line.className = 'now-line';
+        twoCol.appendChild(line);
+      }
+      line.style.top = `${(nowMin - startMin) * effPxPerMin}px`;
+    };
+    placeNowLine();
+    nowLineTimer = setInterval(placeNowLine, 60_000);
+  }
 
   // Wire individual event clicks
   const allEvents = [
@@ -1301,11 +1660,27 @@ function renderDay() {
     ...(state.events.calendar || []).filter((e) => localDay(e.time) === state.selected),
     ...(state.events.email    || []).filter((e) => localDay(e.time) === state.selected),
   ];
-  for (const node of content.querySelectorAll('.event[data-id]')) {
+  // Build a quick id→item map for hover tooltip lookups
+  const singleItemMap = new Map(
+    eventItems.filter((i) => !i._mergedId).map((i) => [String(i.id), i]),
+  );
+  let bubbleHoverTimer;
+  for (const node of content.querySelectorAll('.event-bubble[data-id]')) {
     node.addEventListener('click', () => {
       const ev = allEvents.find((x) => String(x.id) === node.dataset.id);
       if (ev) addEventToTempo(ev);
     });
+    const item = singleItemMap.get(node.dataset.id);
+    if (item) {
+      node.addEventListener('mouseenter', () => {
+        clearTimeout(bubbleHoverTimer);
+        bubbleHoverTimer = setTimeout(() => {
+          document.getElementById('bub-tooltip')?.remove();
+          showBubbleTooltip(item, node, addedSet, allEvents);
+        }, 250);
+      });
+      node.addEventListener('mouseleave', () => clearTimeout(bubbleHoverTimer));
+    }
   }
 
   // Wire meeting block clicks → log matching duration + start time
@@ -1331,7 +1706,7 @@ function renderDay() {
       mergeHoverTimer = setTimeout(() => {
         document.getElementById('compact-popup')?.remove();
         showCompactPopup(mergedItem._group, node, addedSet, allEvents, true);
-      }, 180);
+      }, 250);
     });
     node.addEventListener('mouseleave', () => clearTimeout(mergeHoverTimer));
   }
@@ -1344,6 +1719,7 @@ function renderDay() {
       renderDay();
     });
   }
+
 }
 
 function escapeHtml(s) {
@@ -1355,6 +1731,27 @@ function escapeHtml(s) {
 // ---------- Tempo log ----------
 function entriesForDay() {
   return (state.tempoByDay[state.selected] ||= []);
+}
+
+function nextStartTime() {
+  const entries = entriesForDay();
+  let maxEndMin = -1;
+  for (const e of entries) {
+    if (!e.startTime) continue;
+    const [h, m] = e.startTime.split(':').map(Number);
+    const endMin = h * 60 + m + Math.round((parseInt(e.timeSeconds, 10) || 0) / 60);
+    if (endMin > maxEndMin) maxEndMin = endMin;
+  }
+  if (maxEndMin >= 0) {
+    const clamped = Math.min(maxEndMin, 23 * 60 + 45);
+    return `${pad(Math.floor(clamped / 60))}:${pad(clamped % 60)}:00`;
+  }
+  if (state.selected === ymd(new Date())) {
+    const now = new Date();
+    const roundedMin = Math.ceil((now.getHours() * 60 + now.getMinutes()) / 15) * 15;
+    return `${pad(Math.floor(roundedMin / 60))}:${pad(roundedMin % 60)}:00`;
+  }
+  return '09:00:00';
 }
 
 function addEventToTempo(ev) {
@@ -1382,6 +1779,7 @@ function addEventToTempo(ev) {
       timeSeconds: 30 * 60,
       description,
       sourceIds: [String(ev.id)],
+      startTime: hhmm(ev.time) + ':00',
     });
   }
   saveTempo();
@@ -1393,9 +1791,8 @@ function addMeetingToTempo(item) {
   if (!state.selected) return;
   const list = entriesForDay();
   if (list.some((e) => (e.sourceIds || []).includes(item.id))) return; // already added
-  const proj = projectFor(item.raw);
   const keyFromTitle = extractIssueKey(item.title);
-  const issueKey = keyFromTitle || (proj ? `${proj}-` : '');
+  const issueKey = keyFromTitle || issueKeyFromMapping(item.raw);
   list.push({
     id: cryptoId(),
     issueKey,
@@ -1404,6 +1801,29 @@ function addMeetingToTempo(item) {
     sourceIds: [item.id],
     startTime: item.displayTime + ':00',
   });
+  saveTempo();
+  renderTempo();
+  renderDay();
+}
+
+function logAllMeetings(day) {
+  const meetings = (state.events.calendar || []).filter(
+    (e) => localDay(e.time) === day && e.kind !== 'event-all-day' && (e.duration || 0) > 0,
+  );
+  if (!meetings.length) return;
+  const list = state.tempoByDay[day] || (state.tempoByDay[day] = []);
+  for (const ev of meetings) {
+    if (list.some((e) => (e.sourceIds || []).includes(String(ev.id)))) continue;
+    const issueKey = extractIssueKey(ev.title) || issueKeyFromMapping(ev);
+    list.push({
+      id: cryptoId(),
+      issueKey,
+      timeSeconds: ev.duration,
+      description: ev.title || '',
+      sourceIds: [String(ev.id)],
+      startTime: hhmm(ev.time) + ':00',
+    });
+  }
   saveTempo();
   renderTempo();
   renderDay();
@@ -1441,23 +1861,40 @@ function renderTempo() {
   if (!state.selected) {
     totalEl.textContent = '';
     list.innerHTML = '<li class="muted small">Select a day first.</li>';
+    document.getElementById('send-btn').disabled = true;
     return;
   }
 
   const entries = entriesForDay();
   const total = entries.reduce((s, e) => s + (parseInt(e.timeSeconds, 10) || 0), 0);
   totalEl.textContent = entries.length ? `Σ ${formatDuration(total)}` : '';
+  document.getElementById('send-btn').disabled = entries.length === 0;
 
   if (entries.length === 0) {
-    list.innerHTML = '<li class="muted small">Click an event on the left to add it, or use “+ Empty entry”.</li>';
+    list.innerHTML = `<li class=”tempo-empty-hint”>
+      <ol>
+        <li>Click an event in the timeline, or <strong>+ Empty entry</strong></li>
+        <li>Fill in the Jira issue key &amp; time</li>
+        <li>Hit <strong>Send to Tempo</strong> — entries are logged for real</li>
+      </ol>
+    </li>`;
     return;
   }
 
-  for (const entry of entries) {
+  const sorted = [...entries].sort((a, b) => {
+    if (!a.startTime && !b.startTime) return 0;
+    if (!a.startTime) return 1;
+    if (!b.startTime) return -1;
+    return a.startTime.localeCompare(b.startTime);
+  });
+
+  for (const entry of sorted) {
     const li = document.createElement('li');
     li.dataset.id = entry.id;
+    const startVal = entry.startTime ? entry.startTime.slice(0, 5) : '';
     li.innerHTML = `
       <div class="tempo-row">
+        <input name="start" class="tempo-start" placeholder="HH:MM" value="${escapeHtml(startVal)}" title="Start time" />
         <div class="issue-wrap"><input name="issue" placeholder="ISSUE-123" value="${escapeHtml(entry.issueKey)}" autocomplete="off" /></div>
         <input name="time" placeholder="1h 30m" value="${formatDuration(entry.timeSeconds)}" />
         <button class="remove" title="Remove">×</button>
@@ -1467,6 +1904,24 @@ function renderTempo() {
       </div>
     `;
     wireIssueInput(li.querySelector('input[name="issue"]'), entry);
+    li.querySelector('input[name="start"]').addEventListener('change', (e) => {
+      const val = e.target.value.trim();
+      if (!val) {
+        entry.startTime = null;
+      } else {
+        const m = val.match(/^(\d{1,2}):(\d{2})$/);
+        const h = m ? parseInt(m[1], 10) : NaN;
+        const min = m ? parseInt(m[2], 10) : NaN;
+        if (!isNaN(h) && h <= 23 && !isNaN(min) && min <= 59) {
+          entry.startTime = `${pad(h)}:${pad(min)}:00`;
+          e.target.value = `${pad(h)}:${pad(min)}`;
+        } else {
+          e.target.value = startVal; // revert invalid input
+        }
+      }
+      saveTempo();
+      renderDay();
+    });
     li.querySelector('input[name="time"]').addEventListener('change', (e) => {
       const sec = parseDuration(e.target.value);
       entry.timeSeconds = sec;
@@ -1495,7 +1950,7 @@ function renderFavorites() {
   const bar = document.getElementById('favorites-bar');
   if (!bar) return;
   if (!state.favorites.length) {
-    bar.innerHTML = '<span class="muted small">No favorites yet — click ★ Favorites to add some.</span>';
+    bar.innerHTML = '<span class="muted small">No favorites yet — click Edit to add some.</span>';
     return;
   }
   bar.innerHTML = state.favorites.map((f) => {
@@ -1529,6 +1984,7 @@ function addFavoriteToDay(fav) {
       timeSeconds: parseInt(fav.timeSeconds, 10) || 30 * 60,
       description: fav.description || '',
       sourceIds: [],
+      startTime: nextStartTime(),
     });
   }
   saveTempo();
@@ -1689,6 +2145,66 @@ async function copyTempo() {
   }
 }
 
+function getMappingSuggestions(sentEntries) {
+  const calEvents = state.events.calendar || [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of sentEntries) {
+    if (!/^[A-Z][A-Z0-9]+-\d+$/.test(entry.issueKey || '')) continue;
+    for (const sid of (entry.sourceIds || [])) {
+      const ev = calEvents.find((e) => String(e.id) === String(sid));
+      if (!ev || !ev.title) continue;
+      const title = ev.title.trim();
+      if (seen.has(title.toLowerCase())) continue;
+      const alreadyMapped = state.mappings.some(
+        (m) => m.type === 'calendar' && m.key.toLowerCase() === title.toLowerCase(),
+      );
+      if (alreadyMapped) continue;
+      seen.add(title.toLowerCase());
+      out.push({ meetingTitle: title, project: entry.issueKey });
+    }
+  }
+  return out;
+}
+
+function showMappingSuggestions(suggestions) {
+  const container = document.getElementById('mapping-suggestion');
+  if (!container) return;
+  let idx = 0;
+  function render() {
+    if (idx >= suggestions.length) {
+      container.innerHTML = '';
+      container.classList.add('hidden');
+      return;
+    }
+    const s = suggestions[idx];
+    container.classList.remove('hidden');
+    container.innerHTML = `
+      <div class="map-sugg-inner">
+        <div class="map-sugg-text">💡 Map <strong>${escapeHtml(s.meetingTitle)}</strong></div>
+        <div class="map-sugg-value-row">
+          <span class="map-sugg-arrow">→</span>
+          <input class="map-sugg-input" value="${escapeHtml(s.project)}" placeholder="PROJ or PROJ-123" title="Enter a project key (e.g. FTL) or a full task key (e.g. FTL-123)" />
+        </div>
+        <div class="map-sugg-btns">
+          <button class="map-sugg-yes primary">Add mapping</button>
+          <button class="map-sugg-no">Skip</button>
+        </div>
+      </div>`;
+    container.querySelector('.map-sugg-yes').addEventListener('click', async () => {
+      const val = container.querySelector('.map-sugg-input').value.trim().toUpperCase();
+      if (!val) { toast('Enter a project or task key.', 'err'); return; }
+      try {
+        await saveMappings([...state.mappings, { type: 'calendar', key: s.meetingTitle, project: val }]);
+        toast(`Mapping saved: "${s.meetingTitle}" → ${val}`, 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+      idx++; render();
+    });
+    container.querySelector('.map-sugg-no').addEventListener('click', () => { idx++; render(); });
+  }
+  render();
+}
+
 async function sendTempo() {
   if (!state.selected) return;
   const entries = entriesForDay();
@@ -1718,15 +2234,17 @@ async function sendTempo() {
     const ok = res.results.filter((r) => r.ok).length;
     const fail = res.results.length - ok;
     if (fail === 0) {
-      fb.textContent = `✓ ${ok} worklog(s) sent.`;
-      fb.className = 'feedback ok';
+      const suggestions = getMappingSuggestions(entries);
       // Clear the local drafts for this day (they're now in Tempo).
       delete state.tempoByDay[state.selected];
       saveTempo();
       renderTempo();
       renderDay();
       // Refresh real worklogs so the Tempo column and summary update.
-      loadWorklogs({ refresh: true }).then(() => { renderWeeklySummary(); renderDay(); });
+      loadWorklogs({ refresh: true }).then(() => { renderWeeklySummary(); renderDay(); renderCalendar(); });
+      fb.textContent = `✓ ${ok} worklog(s) sent.`;
+      fb.className = 'feedback ok';
+      if (suggestions.length) showMappingSuggestions(suggestions);
     } else {
       const errs = res.results.filter((r) => !r.ok).map((r) => `${r.issueKey}: ${r.error}`).join(' · ');
       fb.textContent = `${ok} ok, ${fail} failed → ${errs}`;
@@ -1831,6 +2349,7 @@ function renderMappingsTable(list) {
     github: 'org/repo',
     slack: 'channel-name',
     'slack-dm': 'Display Name',
+    calendar: 'Meeting title',
   };
   list.forEach((m, i) => {
     const tr = document.createElement('tr');
@@ -1839,6 +2358,7 @@ function renderMappingsTable(list) {
         <option value="github"${m.type === 'github' ? ' selected' : ''}>GitHub repo</option>
         <option value="slack"${m.type === 'slack' ? ' selected' : ''}>Slack channel</option>
         <option value="slack-dm"${m.type === 'slack-dm' ? ' selected' : ''}>Slack DM</option>
+        <option value="calendar"${m.type === 'calendar' ? ' selected' : ''}>Calendar meeting</option>
       </select></td>
       <td><input value="${escapeHtml(m.key)}" placeholder="${placeholders[m.type] || ''}"></td>
       <td><input value="${escapeHtml(m.project)}" placeholder="ABC" style="text-transform:uppercase"></td>
@@ -1905,11 +2425,17 @@ async function shiftMonth(delta) {
   pickInitialDay();
 }
 
+function updateTodayBtn() {
+  const btn = document.getElementById('today-btn');
+  if (btn) btn.disabled = state.selected === ymd(new Date());
+}
+
 function selectDay(dStr) {
   state.selected = dStr;
   renderCalendar();
   renderDay();
   renderTempo();
+  updateTodayBtn();
 }
 
 function shiftDay(delta) {
@@ -1938,6 +2464,7 @@ function gotoToday() {
   renderCalendar();
   renderDay();
   renderTempo();
+  updateTodayBtn();
   Promise.all([loadEvents(), loadWorklogs()]).then(() => { renderCalendar(); renderDay(); });
 }
 
@@ -1952,6 +2479,285 @@ function pickInitialDay() {
   const days = Object.keys(state.dayIndex).sort();
   if (days.length) selectDay(days[days.length - 1]);
   else renderDay();
+}
+
+// ---------- Onboarding ----------
+const OB_STEPS = ['welcome', 'github', 'slack', 'jira', 'google', 'done'];
+let obStepIdx = 0;
+let _activeObSteps = [...OB_STEPS];
+
+function obStepDef(id) {
+  const defs = {
+    welcome: {
+      icon: '⚡',
+      title: 'Welcome to WorkPulse',
+      hideProgress: true,
+      html: `
+        <p class="ob-desc">WorkPulse aggregates your work activity from <strong>GitHub, Slack, Google Calendar, and Gmail</strong> into a daily timeline — so you can review your day and log time to Jira via Tempo in seconds.</p>
+        <div class="ob-feature-list">
+          <div class="ob-feature"><span class="ob-fi">📆</span><div><strong>Daily timeline</strong><br>All events from all sources in one chronological view.</div></div>
+          <div class="ob-feature"><span class="ob-fi">⏱</span><div><strong>One-click logging</strong><br>Click an event → it becomes a Tempo draft with the right time pre-filled.</div></div>
+          <div class="ob-feature"><span class="ob-fi">🗺</span><div><strong>Smart mappings</strong><br>Link GitHub repos, Slack channels, and meetings to Jira project keys.</div></div>
+        </div>
+        <p class="ob-desc muted small">Let's connect your tools. Each step is optional — skip what you don't need.</p>`,
+      canSkip: false,
+      nextLabel: 'Get started →',
+    },
+    github: {
+      icon: '🐙',
+      title: 'GitHub',
+      subtitle: 'Commits · Pull requests · Code reviews',
+      howto: `<ol>
+        <li>Open <a href="https://github.com/settings/tokens/new?scopes=read:user,repo&description=WorkPulse" target="_blank" rel="noopener">GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)</a></li>
+        <li>Set a name (e.g. <em>WorkPulse</em>)</li>
+        <li>Select scopes: <code>read:user</code> and <code>repo</code> (or <code>public_repo</code> for public repos only)</li>
+        <li>Click <strong>Generate token</strong> and copy it</li>
+      </ol>`,
+      fields: [
+        { key: 'GITHUB_USERNAME', label: 'GitHub username', type: 'text', placeholder: 'your-github-username' },
+        { key: 'GITHUB_TOKEN',    label: 'Personal access token', type: 'password', placeholder: 'ghp_…' },
+      ],
+      canSkip: true,
+    },
+    slack: {
+      icon: '💬',
+      title: 'Slack',
+      subtitle: 'Messages you sent in channels & DMs',
+      howto: `<ol>
+        <li>Go to <a href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → <strong>Create New App</strong> → From scratch</li>
+        <li>Pick any name (e.g. <em>WorkPulse</em>) and select your workspace</li>
+        <li>In the app settings go to <strong>OAuth & Permissions</strong> → Scopes → <strong>User Token Scopes</strong></li>
+        <li>Add scope: <code>search:read</code></li>
+        <li>Click <strong>Install to Workspace</strong> → copy the <em>User OAuth Token</em> (starts with <code>xoxp-</code>)</li>
+      </ol>`,
+      fields: [
+        { key: 'SLACK_TOKEN', label: 'User OAuth Token', type: 'password', placeholder: 'xoxp-…' },
+      ],
+      canSkip: true,
+    },
+    jira: {
+      icon: '📋',
+      title: 'Jira & Tempo',
+      subtitle: 'Issue search · Time logging',
+      howto: `<strong>Jira API token</strong>
+      <ol>
+        <li>Go to <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">Atlassian account → Security → API tokens</a></li>
+        <li>Click <strong>Create API token</strong>, give it a label, copy the value</li>
+      </ol>
+      <strong>Tempo token</strong>
+      <ol>
+        <li>In Tempo: <strong>Settings → API Integration → New Token</strong></li>
+        <li>Select all scopes, copy the token</li>
+      </ol>`,
+      fields: [
+        { key: 'JIRA_BASE_URL',   label: 'Jira base URL',      type: 'text',     placeholder: 'https://your-org.atlassian.net' },
+        { key: 'JIRA_EMAIL',      label: 'Atlassian email',    type: 'text',     placeholder: 'you@company.com' },
+        { key: 'JIRA_API_TOKEN',  label: 'Jira API token',     type: 'password', placeholder: 'token from id.atlassian.com' },
+        { key: 'TEMPO_TOKEN',     label: 'Tempo token',        type: 'password', placeholder: 'tempo API token' },
+      ],
+      canSkip: true,
+    },
+    google: {
+      icon: '📅',
+      title: 'Google Calendar & Gmail',
+      subtitle: 'Meetings · Sent emails',
+      howto: `<ol>
+        <li>Open <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud Console → APIs & Services → Credentials</a></li>
+        <li>Create a project (or select an existing one)</li>
+        <li>Enable <strong>Google Calendar API</strong> and <strong>Gmail API</strong></li>
+        <li>Click <strong>+ Create Credentials → OAuth client ID</strong> → Application type: <em>Web application</em></li>
+        <li>Add Authorized redirect URI: <code>http://localhost:3333/auth/google/callback</code></li>
+        <li>Copy the <strong>Client ID</strong> and <strong>Client Secret</strong></li>
+      </ol>`,
+      fields: [
+        { key: 'GOOGLE_CLIENT_ID',     label: 'Client ID',     type: 'text',     placeholder: '….apps.googleusercontent.com' },
+        { key: 'GOOGLE_CLIENT_SECRET', label: 'Client Secret', type: 'password', placeholder: 'GOCSPX-…' },
+      ],
+      canSkip: true,
+      hasOauth: true,
+    },
+    done: {
+      icon: '✅',
+      title: 'You\'re all set!',
+      hideProgress: false,
+      html: `
+        <p class="ob-desc">Here's how to use WorkPulse day-to-day:</p>
+        <div class="ob-feature-list">
+          <div class="ob-feature"><span class="ob-fi">1</span><div><strong>Pick a day</strong><br>Click any day in the left calendar. Dots show days with activity.</div></div>
+          <div class="ob-feature"><span class="ob-fi">2</span><div><strong>Build your log</strong><br>Click events in the timeline to add them as draft entries in the right panel. Or click meetings in the Tempo column.</div></div>
+          <div class="ob-feature"><span class="ob-fi">3</span><div><strong>Send to Tempo</strong><br>Fill in issue keys and times, then hit <strong>Send to Tempo</strong>. Done.</div></div>
+          <div class="ob-feature"><span class="ob-fi">💡</span><div><strong>Mappings</strong><br>Open <strong>Mappings</strong> in the toolbar to link repos, channels, and meetings to Jira project keys — they'll auto-fill next time.</div></div>
+        </div>`,
+      canSkip: false,
+      nextLabel: 'Start using WorkPulse',
+      isLast: true,
+    },
+  };
+  return defs[id] || {};
+}
+
+function showOnboarding(startStep = 0) {
+  _activeObSteps = [...OB_STEPS];
+  obStepIdx = startStep;
+  document.getElementById('onboarding-modal').classList.remove('hidden');
+  renderObStep();
+}
+
+function showOnboardingFiltered() {
+  const cfg = state.health.config || {};
+  _activeObSteps = OB_STEPS.filter((id) => {
+    if (id === 'welcome' || id === 'done') return true;
+    if (id === 'github') return !cfg.github;
+    if (id === 'slack')  return !cfg.slack;
+    if (id === 'jira')   return !cfg.jira || !cfg.tempo;
+    if (id === 'google') return !cfg.google;
+    return true;
+  });
+  // If everything is already set up, just mark done silently
+  if (_activeObSteps.length <= 2) {
+    localStorage.setItem('workpulse:onboarding-done', '1');
+    return;
+  }
+  obStepIdx = 0;
+  document.getElementById('onboarding-modal').classList.remove('hidden');
+  renderObStep();
+}
+
+function hideOnboarding() {
+  document.getElementById('onboarding-modal').classList.add('hidden');
+  localStorage.setItem('workpulse:onboarding-done', '1');
+}
+
+function renderObStep() {
+  const id = _activeObSteps[obStepIdx];
+  const def = obStepDef(id);
+  const isFirst = obStepIdx === 0;
+  const isLast  = def.isLast;
+
+  // Progress dots — only for middle steps, hide on welcome
+  const prog = document.getElementById('ob-progress');
+  if (def.hideProgress) {
+    prog.innerHTML = '';
+  } else {
+    prog.innerHTML = _activeObSteps.map((s, i) =>
+      `<span class="ob-dot${i === obStepIdx ? ' ob-dot-active' : ''}"></span>`,
+    ).join('');
+  }
+
+  // Body
+  let bodyHtml = `<div class="ob-step-head">
+    <span class="ob-icon">${def.icon}</span>
+    <div>
+      <div class="ob-step-title">${def.title}</div>
+      ${def.subtitle ? `<div class="ob-step-sub">${def.subtitle}</div>` : ''}
+    </div>
+  </div>`;
+
+  if (def.html) {
+    bodyHtml += def.html;
+  } else {
+    if (def.howto) {
+      bodyHtml += `<details class="ob-howto" open><summary>How to get the token</summary><div class="ob-howto-body">${def.howto}</div></details>`;
+    }
+    if (def.fields) {
+      bodyHtml += '<div class="ob-fields">';
+      for (const f of def.fields) {
+        bodyHtml += `<div class="ob-field">
+          <label>${escapeHtml(f.label)}</label>
+          <input type="${f.type}" data-cfg-key="${f.key}" placeholder="${escapeHtml(f.placeholder)}" autocomplete="off" />
+        </div>`;
+      }
+      bodyHtml += '</div>';
+    }
+    if (def.hasOauth) {
+      bodyHtml += `<button id="ob-google-connect" class="ob-oauth-btn">Save credentials &amp; Connect Google →</button>
+        <p class="muted small" style="margin-top:6px">This opens Google's login page. You'll return here automatically.</p>`;
+    }
+  }
+
+  document.getElementById('ob-body').innerHTML = bodyHtml;
+
+  // Pre-fill fields from existing config (read current input values from Settings)
+  if (def.fields) {
+    const settingsMap = {
+      GITHUB_USERNAME:     'cfg-github-username',
+      GITHUB_TOKEN:        'cfg-github-token',
+      SLACK_TOKEN:         'cfg-slack-token',
+      JIRA_BASE_URL:       'cfg-jira-url',
+      JIRA_EMAIL:          'cfg-jira-email',
+      JIRA_API_TOKEN:      'cfg-jira-token',
+      TEMPO_TOKEN:         'cfg-tempo-token',
+      GOOGLE_CLIENT_ID:    'cfg-google-id',
+      GOOGLE_CLIENT_SECRET:'cfg-google-secret',
+    };
+    for (const f of def.fields) {
+      const settingsInput = document.getElementById(settingsMap[f.key]);
+      if (settingsInput?.value) {
+        const obInput = document.querySelector(`[data-cfg-key="${f.key}"]`);
+        if (obInput) obInput.value = settingsInput.value;
+      }
+    }
+  }
+
+  // Nav buttons
+  document.getElementById('ob-back').style.visibility = isFirst ? 'hidden' : 'visible';
+  document.getElementById('ob-next').textContent = def.nextLabel || (isLast ? 'Finish' : 'Next →');
+
+  // Wire Google connect button
+  if (def.hasOauth) {
+    document.getElementById('ob-google-connect')?.addEventListener('click', async () => {
+      await obSaveFields();
+      localStorage.setItem('workpulse:onboarding-step', 'google');
+      window.location.href = '/auth/google';
+    });
+  }
+}
+
+async function obSaveFields() {
+  const inputs = document.querySelectorAll('#ob-body [data-cfg-key]');
+  const body = {};
+  for (const input of inputs) {
+    const val = input.value.trim();
+    if (val) body[input.dataset.cfgKey] = val;
+  }
+  if (Object.keys(body).length === 0) return;
+  try {
+    await api('/api/config', { method: 'PUT', body: JSON.stringify(body) });
+    // Mirror into Settings inputs so they stay in sync
+    const settingsMap = {
+      GITHUB_USERNAME:     'cfg-github-username',
+      GITHUB_TOKEN:        'cfg-github-token',
+      SLACK_TOKEN:         'cfg-slack-token',
+      JIRA_BASE_URL:       'cfg-jira-url',
+      JIRA_EMAIL:          'cfg-jira-email',
+      JIRA_API_TOKEN:      'cfg-jira-token',
+      TEMPO_TOKEN:         'cfg-tempo-token',
+      GOOGLE_CLIENT_ID:    'cfg-google-id',
+      GOOGLE_CLIENT_SECRET:'cfg-google-secret',
+    };
+    for (const [key, val] of Object.entries(body)) {
+      const settingsEl = document.getElementById(settingsMap[key]);
+      if (settingsEl) settingsEl.value = val;
+    }
+  } catch (e) {
+    toast(`Save failed: ${e.message}`, 'err');
+  }
+}
+
+async function obNext() {
+  await obSaveFields();
+  obStepIdx++;
+  if (obStepIdx >= _activeObSteps.length) {
+    hideOnboarding();
+    await loadHealth();
+    renderStatusPill();
+  } else {
+    renderObStep();
+  }
+}
+
+function obBack() {
+  if (obStepIdx > 0) { obStepIdx--; renderObStep(); }
 }
 
 // ---------- Boot ----------
@@ -1978,11 +2784,14 @@ async function boot() {
     updateGoogleStatusUI();
     toast('Google disconnected.', 'ok');
   });
+  document.getElementById('onboarding-btn').addEventListener('click', () => showOnboarding(0));
+  document.getElementById('settings-onboarding-btn').addEventListener('click', () => { closeSettings(); showOnboarding(0); });
+  document.getElementById('ob-back').addEventListener('click', obBack);
+  document.getElementById('ob-next').addEventListener('click', obNext);
   document.getElementById('mappings-btn').addEventListener('click', openMappings);
   document.getElementById('mappings-close').addEventListener('click', closeMappings);
   document.getElementById('favorites-btn').addEventListener('click', openFavorites);
   document.getElementById('favorites-close').addEventListener('click', closeFavorites);
-  document.getElementById('copy-btn').addEventListener('click', copyTempo);
   document.getElementById('send-btn').addEventListener('click', sendTempo);
   document.getElementById('add-entry').addEventListener('click', () => {
     if (!state.selected) { toast('Select a day first.', 'err'); return; }
@@ -1992,6 +2801,7 @@ async function boot() {
       timeSeconds: 30 * 60,
       description: '',
       sourceIds: [],
+      startTime: nextStartTime(),
     });
     saveTempo();
     renderTempo();
@@ -2009,8 +2819,15 @@ async function boot() {
   // Handle Google OAuth redirect params
   const _sp = new URLSearchParams(window.location.search);
   if (_sp.has('google')) {
-    toast('Google connected.', 'ok');
     history.replaceState(null, '', window.location.pathname);
+    const obInProgress = localStorage.getItem('workpulse:onboarding-step');
+    if (obInProgress) {
+      localStorage.removeItem('workpulse:onboarding-step');
+      _activeObSteps = [...OB_STEPS];
+      showOnboarding(OB_STEPS.indexOf('done'));
+    } else {
+      toast('Google connected.', 'ok');
+    }
   } else if (_sp.has('google_error')) {
     toast('Google error: ' + _sp.get('google_error'), 'err');
     history.replaceState(null, '', window.location.pathname);
@@ -2026,6 +2843,10 @@ async function boot() {
     await Promise.all([loadEvents(), loadWorklogs()]);
     renderCalendar();
     pickInitialDay();
+    // Auto-show onboarding on first launch (filtered to only unconfigured steps)
+    if (!localStorage.getItem('workpulse:onboarding-done') && !_sp.has('google')) {
+      showOnboardingFiltered();
+    }
   } catch (e) {
     toast('Boot failed: ' + e.message, 'err');
   }

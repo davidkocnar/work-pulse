@@ -172,13 +172,39 @@ app.post('/api/tempo', async (req, res) => {
 app.put('/api/tempo/worklog/:id', async (req, res) => {
   if (!env.tempoToken || !env.baseUrl || !env.email || !env.apiToken)
     return res.status(400).json({ error: 'Tempo / Jira not configured' });
-  const { issueId, startDate, startTime, timeSeconds, description } = req.body || {};
+  let { issueId, issueKey, currentIssueId, startDate, startTime, timeSeconds, description } = req.body || {};
+  if (!issueId && issueKey) {
+    try { issueId = await tempo.resolveIssueId(issueKey, env); }
+    catch (e) { return res.status(400).json({ error: `Cannot resolve issue key: ${e.message}` }); }
+  }
   if (!issueId || !startDate || !startTime || !timeSeconds)
-    return res.status(400).json({ error: 'issueId, startDate, startTime, timeSeconds required' });
+    return res.status(400).json({ error: 'issueId (or issueKey), startDate, startTime, timeSeconds required' });
+
+  // Tempo API does not support moving a worklog to a different issue via PUT.
+  // Detect the change and recreate the worklog instead.
+  if (currentIssueId && issueId && Number(issueId) !== Number(currentIssueId)) {
+    try {
+      await tempo.deleteWorklog({ id: req.params.id }, env);
+      const wl = await tempo.createWorklog({ issueKey, date: startDate, timeSeconds, description, startTime }, env);
+      cache.invalidate('tempo:worklogs');
+      return res.json(wl);
+    } catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
+  }
+
   try {
     const wl = await tempo.updateWorklog({ id: req.params.id, issueId, startDate, startTime, timeSeconds, description }, env);
     cache.invalidate('tempo:worklogs');
     res.json(wl);
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+app.delete('/api/tempo/worklog/:id', async (req, res) => {
+  if (!env.tempoToken || !env.baseUrl || !env.email || !env.apiToken)
+    return res.status(400).json({ error: 'Tempo / Jira not configured' });
+  try {
+    await tempo.deleteWorklog({ id: req.params.id }, env);
+    cache.invalidate('tempo:worklogs');
+    res.status(204).end();
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 

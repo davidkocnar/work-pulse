@@ -281,9 +281,25 @@ async function updateWorklog({ id, issueId, startDate, startTime, timeSeconds, d
   return res.json();
 }
 
+async function deleteWorklog({ id }, env) {
+  const { tempoToken } = env;
+  if (!tempoToken) throw new Error('TEMPO_TOKEN not configured');
+  const res = await fetch(`https://api.tempo.io/4/worklogs/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${tempoToken}`, Accept: 'application/json' },
+  });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`Tempo ${res.status}: ${text.slice(0, 300)}`);
+    err.status = res.status;
+    throw err;
+  }
+}
+
 module.exports = {
   createWorklog,
   updateWorklog,
+  deleteWorklog,
   resolveIssueId,
   resolveIssueKeysBulk,
   getMyAccountId,
