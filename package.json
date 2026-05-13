@@ -25,6 +25,7 @@
   "build": {
     "appId": "app.futured.workpulse",
     "productName": "WorkPulse",
+    "npmRebuild": false,
     "files": [
       "electron/**",
       "server/**",
