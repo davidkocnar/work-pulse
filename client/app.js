@@ -28,6 +28,7 @@ const state = {
 // Active source filters for the day timeline (left/activity column only). Resets on reload.
 let timelineFilters = new Set(['github', 'slack', 'email']);
 let nowLineTimer = null;
+let _focusedDraftEntryId = null; // id of the draft entry whose input/textarea last received focus
 
 const _issueTitleCache = (() => {
   try { return new Map(JSON.parse(localStorage.getItem('workpulse:issueTitles') || '[]')); }
@@ -288,11 +289,12 @@ async function loadEvents({ refresh = false } = {}) {
       email:    data.email    || [],
     };
     rebuildDayIndex();
+    const cfg = state.health.config || {};
     const errMsgs = [];
-    if (data.errors?.github)   errMsgs.push(`GitHub: ${data.errors.github}`);
-    if (data.errors?.slack)    errMsgs.push(`Slack: ${data.errors.slack}`);
-    if (data.errors?.calendar) errMsgs.push(`Calendar: ${data.errors.calendar}`);
-    if (data.errors?.email)    errMsgs.push(`Gmail: ${data.errors.email}`);
+    if (data.errors?.github   && cfg.github)  errMsgs.push(`GitHub: ${data.errors.github}`);
+    if (data.errors?.slack    && cfg.slack)   errMsgs.push(`Slack: ${data.errors.slack}`);
+    if (data.errors?.calendar && cfg.google)  errMsgs.push(`Calendar: ${data.errors.calendar}`);
+    if (data.errors?.email    && cfg.google)  errMsgs.push(`Gmail: ${data.errors.email}`);
     if (errMsgs.length) toast(errMsgs.join(' · '), 'err');
   } finally {
     state.loading = false;
@@ -454,7 +456,7 @@ function renderWeeklySummary() {
     </div>`;
     const items = Object.entries(logged).sort((a, b) => b[1] - a[1]);
     const total = items.reduce((s, [, v]) => s + v, 0);
-    html += '<h4>Logged in Tempo</h4>';
+    html += '<h4>Logged this month</h4>';
     if (items.length === 0) {
       html += '<div class="muted">No worklogs this month.</div>';
     } else {
@@ -867,6 +869,7 @@ function renderTempoColumn(worklogs, draftEntries, calMeetings, addedSet, startM
       ${showDesc ? `<span class="wb-desc">${escapeHtml(w.description.slice(0, 60))}</span>` : ''}
       <div class="wb-block-actions">
         <button class="wb-btn-edit" title="Edit description">✎</button>
+        <button class="wb-btn-dup" title="Duplicate after">⧉</button>
         <button class="wb-btn-del" title="Delete">×</button>
       </div>
       <div class="wb-resize-handle"></div>
@@ -1113,6 +1116,31 @@ function wireTempoColumnDrag(colEl, startMin, pxPerMin = PX_PER_MIN) {
       if (wl) showWorklogEditPopup(wl, block);
     });
 
+    // Duplicate button — creates a draft entry starting right after the worklog ends
+    block.querySelector('.wb-btn-dup')?.addEventListener('mousedown', (e) => e.stopPropagation());
+    block.querySelector('.wb-btn-dup')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wl = state.worklogs.find((w) => String(w.id) === wlId);
+      if (!wl || !state.selected) return;
+      const startMinutes = timeToMinutesOfDay(wl.startTime);
+      const durMinutes = Math.ceil((wl.timeSpentSeconds || 0) / 60);
+      const newStartMin = Math.min(startMinutes + durMinutes, 23 * 60 + 45);
+      const newStart = `${pad(Math.floor(newStartMin / 60))}:${pad(newStartMin % 60)}:00`;
+      if (!state.tempoByDay[state.selected]) state.tempoByDay[state.selected] = [];
+      state.tempoByDay[state.selected].push({
+        id: cryptoId(),
+        issueKey: wl.issueKey || '',
+        timeSeconds: wl.timeSpentSeconds,
+        description: wl.description || '',
+        sourceIds: [],
+        startTime: newStart,
+      });
+      saveTempo();
+      renderTempo();
+      renderDay();
+      toast(`Duplicated at ${newStart.slice(0, 5)}`);
+    });
+
     // Delete button
     block.querySelector('.wb-btn-del')?.addEventListener('mousedown', (e) => e.stopPropagation());
     block.querySelector('.wb-btn-del')?.addEventListener('click', async (e) => {
@@ -1224,7 +1252,10 @@ function showBubbleTooltip(item, anchorEl, addedSet, allEvents) {
     <div class="bub-tt-body">${escapeHtml(item.title || '(no title)')}</div>
     ${metaParts.length ? `<div class="bub-tt-meta">${metaParts.join(' · ')}</div>` : ''}
     ${item.url ? `<div class="bub-tt-meta"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Open ↗</a></div>` : ''}
-    <div class="bub-tt-foot">${added ? '✓ Added to Tempo' : 'Click to add to Tempo'}</div>`;
+    <div class="bub-tt-foot">${added
+      ? '<span class="bub-tt-foot-added">✓ Added to Tempo</span>'
+      : '<button class="primary bub-tt-foot-btn">Add to Tempo</button>'
+    }</div>`;
 
   const rect = anchorEl.getBoundingClientRect();
   const popW = 280;
@@ -1428,6 +1459,15 @@ function wireIssueInput(input, entry) {
 
   input.addEventListener('input', (e) => {
     entry.issueKey = e.target.value.toUpperCase().trim();
+    // Auto-fill description from issue title cache when field is empty and key is complete
+    if (!entry.description && /^[A-Z][A-Z0-9]+-\d+$/.test(entry.issueKey)) {
+      const cached = _issueTitleCache.get(entry.issueKey);
+      if (cached) {
+        entry.description = cached;
+        const ta = input.closest('li')?.querySelector('textarea[name="desc"]');
+        if (ta) ta.value = cached;
+      }
+    }
     saveTempo();
     renderWeeklySummary();
     updateValidation();
@@ -1469,6 +1509,11 @@ function wireIssueInput(input, entry) {
       if (titleText) cacheIssueTitle(key, titleText);
       input.value = key;
       entry.issueKey = key;
+      if (!entry.description && titleText) {
+        entry.description = titleText;
+        const ta = input.closest('li')?.querySelector('textarea[name="desc"]');
+        if (ta) ta.value = titleText;
+      }
       saveTempo();
       renderWeeklySummary();
       updateValidation();
@@ -1856,7 +1901,12 @@ function buildDescription(ev) {
     return `${lbl}: ${ev.title}`;
   }
   if (ev.source === 'slack') {
-    return `Slack #${ev.repoOrChannel}: ${ev.title}`;
+    const ch = ev.repoOrChannel || '';
+    return ch.startsWith('dm:') ? `Slack DM: ${ch.slice(3)}` : `Slack #${ch}`;
+  }
+  if (ev.source === 'email') {
+    const to = ev.repoOrChannel || '';
+    return to ? `To: ${to} · ${ev.title || ''}` : ev.title || '';
   }
   return ev.title || '';
 }
@@ -1916,6 +1966,11 @@ function renderTempo() {
       </div>
     `;
     wireIssueInput(li.querySelector('input[name="issue"]'), entry);
+    // Track which draft entry is active so favorites can fill it in place.
+    for (const el of li.querySelectorAll('input[name="issue"], textarea[name="desc"]')) {
+      el.addEventListener('focus', () => { _focusedDraftEntryId = entry.id; });
+      el.addEventListener('blur',  () => { setTimeout(() => { _focusedDraftEntryId = null; }, 200); });
+    }
     li.querySelector('input[name="start"]').addEventListener('change', (e) => {
       const val = e.target.value.trim();
       if (!val) {
@@ -1940,6 +1995,7 @@ function renderTempo() {
       e.target.value = formatDuration(sec);
       saveTempo();
       renderTempo();
+      renderDay();
     });
     li.querySelector('textarea[name="desc"]').addEventListener('input', (e) => {
       entry.description = e.target.value;
@@ -1985,6 +2041,23 @@ function renderFavorites() {
 function addFavoriteToDay(fav) {
   if (!state.selected) { toast('Select a day first.', 'err'); return; }
   if (!fav.issueKey) { toast('Favorite has no issue key.', 'err'); return; }
+
+  // If an issue input or description of a draft entry was last focused, update that entry in place.
+  if (_focusedDraftEntryId) {
+    const list = entriesForDay();
+    const entry = list.find((e) => e.id === _focusedDraftEntryId);
+    if (entry) {
+      entry.issueKey = fav.issueKey;
+      if (fav.timeSeconds) entry.timeSeconds = parseInt(fav.timeSeconds, 10) || entry.timeSeconds;
+      if (fav.description) entry.description = fav.description;
+      saveTempo();
+      renderTempo();
+      renderWeeklySummary();
+      toast(`Updated entry to ${fav.issueKey}.`, 'ok');
+      return;
+    }
+  }
+
   const list = entriesForDay();
   const existing = list.find((e) => e.issueKey === fav.issueKey && e.description === (fav.description || ''));
   if (existing) {
@@ -2217,6 +2290,11 @@ function showMappingSuggestions(suggestions) {
   render();
 }
 
+function _extractJiraMessage(errStr) {
+  // Strip any residual JSON blob, keep the human-readable prefix.
+  return errStr.replace(/\{[\s\S]*\}/, '').trim().replace(/:$/, '') || errStr;
+}
+
 async function sendTempo() {
   if (!state.selected) return;
   const entries = entriesForDay();
@@ -2245,22 +2323,30 @@ async function sendTempo() {
     });
     const ok = res.results.filter((r) => r.ok).length;
     const fail = res.results.length - ok;
+    // Remove successfully submitted entries from drafts regardless of partial failure.
+    if (ok > 0) {
+      const okKeys = new Set(res.results.filter((r) => r.ok).map((r) => r.issueKey));
+      const remaining = entries.filter((e) => !okKeys.has(e.issueKey));
+      state.tempoByDay[state.selected] = remaining;
+      if (remaining.length === 0) delete state.tempoByDay[state.selected];
+      saveTempo();
+      loadWorklogs({ refresh: true }).then(() => { renderWeeklySummary(); renderDay(); renderCalendar(); });
+    }
+
     if (fail === 0) {
       const suggestions = getMappingSuggestions(entries);
-      // Clear the local drafts for this day (they're now in Tempo).
-      delete state.tempoByDay[state.selected];
-      saveTempo();
       renderTempo();
       renderDay();
-      // Refresh real worklogs so the Tempo column and summary update.
-      loadWorklogs({ refresh: true }).then(() => { renderWeeklySummary(); renderDay(); renderCalendar(); });
       fb.textContent = `✓ ${ok} worklog(s) sent.`;
       fb.className = 'feedback ok';
       if (suggestions.length) showMappingSuggestions(suggestions);
     } else {
-      const errs = res.results.filter((r) => !r.ok).map((r) => `${r.issueKey}: ${r.error}`).join(' · ');
+      const errs = res.results.filter((r) => !r.ok)
+        .map((r) => `${r.issueKey}: ${_extractJiraMessage(r.error)}`).join(' · ');
       fb.textContent = `${ok} ok, ${fail} failed → ${errs}`;
       fb.className = 'feedback err';
+      renderTempo();
+      renderDay();
     }
   } catch (e) {
     fb.textContent = `Error: ${e.message}`;
@@ -2269,6 +2355,52 @@ async function sendTempo() {
 }
 
 // ---------- Settings modal ----------
+function updateGithubStatusUI() {
+  const oauthEl      = document.getElementById('settings-github-oauth');
+  const manualEl     = document.getElementById('settings-github-manual');
+  const statusEl     = document.getElementById('settings-github-status');
+  const connectBtn   = document.getElementById('settings-github-connect');
+  const disconnectBtn= document.getElementById('settings-github-disconnect');
+  if (!oauthEl) return;
+  const hasOauth  = state.health.githubOAuth;
+  const connected = state.health.config?.github;
+  oauthEl.style.display  = hasOauth ? '' : 'none';
+  manualEl.style.display = hasOauth ? 'none' : '';
+  if (!hasOauth) return;
+  if (connected) {
+    statusEl.textContent = `✓ Connected${state.health.githubUsername ? ' as ' + state.health.githubUsername : ''}`;
+    statusEl.className = 'settings-google-status ok';
+  } else {
+    statusEl.textContent = 'Not connected — click Connect GitHub to authorize.';
+    statusEl.className = 'settings-google-status warn';
+  }
+  connectBtn.style.display    = connected ? 'none' : '';
+  disconnectBtn.style.display = connected ? ''     : 'none';
+}
+
+function updateSlackStatusUI() {
+  const oauthEl      = document.getElementById('settings-slack-oauth');
+  const manualEl     = document.getElementById('settings-slack-manual');
+  const statusEl     = document.getElementById('settings-slack-status');
+  const connectBtn   = document.getElementById('settings-slack-connect');
+  const disconnectBtn= document.getElementById('settings-slack-disconnect');
+  if (!oauthEl) return;
+  const hasOauth  = state.health.slackOAuth;
+  const connected = state.health.config?.slack;
+  oauthEl.style.display  = hasOauth ? '' : 'none';
+  manualEl.style.display = hasOauth ? 'none' : '';
+  if (!hasOauth) return;
+  if (connected) {
+    statusEl.textContent = '✓ Connected';
+    statusEl.className = 'settings-google-status ok';
+  } else {
+    statusEl.textContent = 'Not connected — click Connect Slack to authorize.';
+    statusEl.className = 'settings-google-status warn';
+  }
+  connectBtn.style.display    = connected ? 'none' : '';
+  disconnectBtn.style.display = connected ? ''     : 'none';
+}
+
 function updateGoogleStatusUI() {
   const statusEl      = document.getElementById('settings-google-status');
   const connectBtn    = document.getElementById('settings-google-connect');
@@ -2293,6 +2425,10 @@ function updateGoogleStatusUI() {
 async function openSettings() {
   document.getElementById('settings-modal').classList.remove('hidden');
   document.getElementById('settings-feedback').textContent = '';
+  const redirectEl = document.getElementById('google-redirect-uri-settings');
+  if (redirectEl) redirectEl.textContent = `${window.location.origin}/auth/google/callback`;
+  updateGithubStatusUI();
+  updateSlackStatusUI();
   updateGoogleStatusUI();
   try {
     const cfg = await api('/api/config');
@@ -2334,6 +2470,8 @@ async function saveSettings() {
       }),
     });
     await loadHealth();
+    updateGithubStatusUI();
+    updateSlackStatusUI();
     updateGoogleStatusUI();
     fb.textContent = '✓ Saved';
     fb.className = 'feedback ok';
@@ -2493,8 +2631,19 @@ function pickInitialDay() {
   else renderDay();
 }
 
+// In Electron mode keep the main window stable while OAuth flows in the system browser.
+// window.open triggers setWindowOpenHandler → shell.openExternal, so the local auth route
+// (which redirects to GitHub/Slack/Google) opens in the user's default browser instead.
+function _oauthNavigate(path) {
+  if (state.health?.electronMode) {
+    window.open(path, '_blank');
+  } else {
+    window.location.href = path;
+  }
+}
+
 // ---------- Onboarding ----------
-const OB_STEPS = ['welcome', 'github', 'slack', 'jira', 'google', 'done'];
+const OB_STEPS = ['welcome', 'github', 'slack', 'google', 'jira', 'done'];
 let obStepIdx = 0;
 let _activeObSteps = [...OB_STEPS];
 
@@ -2519,10 +2668,11 @@ function obStepDef(id) {
       icon: '🐙',
       title: 'GitHub',
       subtitle: 'Commits · Pull requests · Code reviews',
+      hasGithubOauth: true,
       howto: `<ol>
         <li>Open <a href="https://github.com/settings/tokens/new?scopes=read:user,repo&description=WorkPulse" target="_blank" rel="noopener">GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)</a></li>
         <li>Set a name (e.g. <em>WorkPulse</em>)</li>
-        <li>Select scopes: <code>read:user</code> and <code>repo</code> (or <code>public_repo</code> for public repos only)</li>
+        <li>Select scopes: <code>read:user</code> and <code>repo</code></li>
         <li>Click <strong>Generate token</strong> and copy it</li>
       </ol>`,
       fields: [
@@ -2535,6 +2685,7 @@ function obStepDef(id) {
       icon: '💬',
       title: 'Slack',
       subtitle: 'Messages you sent in channels & DMs',
+      hasSlackOauth: true,
       howto: `<ol>
         <li>Go to <a href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → <strong>Create New App</strong> → From scratch</li>
         <li>Pick any name (e.g. <em>WorkPulse</em>) and select your workspace</li>
@@ -2553,13 +2704,15 @@ function obStepDef(id) {
       subtitle: 'Issue search · Time logging',
       howto: `<strong>Jira API token</strong>
       <ol>
-        <li>Go to <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">Atlassian account → Security → API tokens</a></li>
-        <li>Click <strong>Create API token</strong>, give it a label, copy the value</li>
+        <li>Open <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">id.atlassian.com → Security → API tokens</a></li>
+        <li>Click <strong>Create API token</strong>, give it any label (e.g. <em>WorkPulse</em>), copy the value</li>
       </ol>
       <strong>Tempo token</strong>
       <ol>
-        <li>In Tempo: <strong>Settings → API Integration → New Token</strong></li>
-        <li>Select all scopes, copy the token</li>
+        <li>In Jira open <strong>Apps → Tempo</strong></li>
+        <li>In the Tempo sidebar click <strong>Settings</strong> (bottom left) → <strong>API Integration</strong></li>
+        <li>Click <strong>New Token</strong>, give it a name, select all scopes, copy the token</li>
+        <li>Not finding it? See <a href="https://support.tempo.io/hc/en-us/articles/360002249572" target="_blank" rel="noopener">Tempo docs → API Integration</a></li>
       </ol>`,
       fields: [
         { key: 'JIRA_BASE_URL',   label: 'Jira base URL',      type: 'text',     placeholder: 'https://your-org.atlassian.net' },
@@ -2578,7 +2731,7 @@ function obStepDef(id) {
         <li>Create a project (or select an existing one)</li>
         <li>Enable <strong>Google Calendar API</strong> and <strong>Gmail API</strong></li>
         <li>Click <strong>+ Create Credentials → OAuth client ID</strong> → Application type: <em>Web application</em></li>
-        <li>Add Authorized redirect URI: <code>http://localhost:3333/auth/google/callback</code></li>
+        <li>Add Authorized redirect URI: <code>${window.location.origin}/auth/google/callback</code></li>
         <li>Copy the <strong>Client ID</strong> and <strong>Client Secret</strong></li>
       </ol>`,
       fields: [
@@ -2622,7 +2775,7 @@ function showOnboardingFiltered() {
     if (id === 'github') return !cfg.github;
     if (id === 'slack')  return !cfg.slack;
     if (id === 'jira')   return !cfg.jira || !cfg.tempo;
-    if (id === 'google') return !cfg.google;
+    if (id === 'google') return cfg.google && !state.health.googleConnected;
     return true;
   });
   // If everything is already set up, just mark done silently
@@ -2637,7 +2790,9 @@ function showOnboardingFiltered() {
 
 function hideOnboarding() {
   document.getElementById('onboarding-modal').classList.add('hidden');
+  const firstTime = !localStorage.getItem('workpulse:onboarding-done');
   localStorage.setItem('workpulse:onboarding-done', '1');
+  if (firstTime) showTour();
 }
 
 function renderObStep() {
@@ -2668,10 +2823,41 @@ function renderObStep() {
   if (def.html) {
     bodyHtml += def.html;
   } else {
-    if (def.howto) {
+    // GitHub OAuth button (shown when admin has configured the OAuth App)
+    if (def.hasGithubOauth && state.health.githubOAuth) {
+      const connected = state.health.config?.github;
+      if (connected) {
+        bodyHtml += `<div class="ob-oauth-connected">✓ Connected as <strong>${escapeHtml(state.health.githubUsername || 'GitHub user')}</strong></div>`;
+      } else {
+        bodyHtml += `<button id="ob-github-connect" class="ob-oauth-btn">Connect GitHub →</button>
+          <p class="muted small" style="margin-top:6px">Opens GitHub login. You'll return here automatically.</p>`;
+      }
+    } else if (def.hasGithubOauth || def.hasSlackOauth) {
+      // OAuth not configured by admin — fall through to manual fields below
+    }
+
+    // Slack OAuth button
+    if (def.hasSlackOauth && state.health.slackOAuth) {
+      const connected = state.health.config?.slack;
+      if (connected) {
+        bodyHtml += `<div class="ob-oauth-connected">✓ Connected to Slack</div>`;
+      } else {
+        bodyHtml += `<button id="ob-slack-connect" class="ob-oauth-btn">Connect Slack →</button>
+          <p class="muted small" style="margin-top:6px">Opens Slack login. You'll return here automatically.</p>`;
+      }
+    }
+
+    // Show manual fields only if OAuth is not available for this step
+    const githubOAuthActive = def.hasGithubOauth && state.health.githubOAuth;
+    const slackOAuthActive  = def.hasSlackOauth  && state.health.slackOAuth;
+    const hideManual = githubOAuthActive || slackOAuthActive;
+
+    if (def.howto && !hideManual) {
+      bodyHtml += `<details class="ob-howto"><summary>How to get the token manually</summary><div class="ob-howto-body">${def.howto}</div></details>`;
+    } else if (def.howto && !def.hasGithubOauth && !def.hasSlackOauth) {
       bodyHtml += `<details class="ob-howto" open><summary>How to get the token</summary><div class="ob-howto-body">${def.howto}</div></details>`;
     }
-    if (def.fields) {
+    if (def.fields && !hideManual) {
       bodyHtml += '<div class="ob-fields">';
       for (const f of def.fields) {
         bodyHtml += `<div class="ob-field">
@@ -2715,12 +2901,24 @@ function renderObStep() {
   document.getElementById('ob-back').style.visibility = isFirst ? 'hidden' : 'visible';
   document.getElementById('ob-next').textContent = def.nextLabel || (isLast ? 'Finish' : 'Next →');
 
-  // Wire Google connect button
+  // Wire OAuth buttons
   if (def.hasOauth) {
     document.getElementById('ob-google-connect')?.addEventListener('click', async () => {
       await obSaveFields();
       localStorage.setItem('workpulse:onboarding-step', 'google');
-      window.location.href = '/auth/google';
+      _oauthNavigate('/auth/google');
+    });
+  }
+  if (def.hasGithubOauth) {
+    document.getElementById('ob-github-connect')?.addEventListener('click', () => {
+      localStorage.setItem('workpulse:onboarding-step', 'github');
+      _oauthNavigate('/auth/github');
+    });
+  }
+  if (def.hasSlackOauth) {
+    document.getElementById('ob-slack-connect')?.addEventListener('click', () => {
+      localStorage.setItem('workpulse:onboarding-step', 'slack');
+      _oauthNavigate('/auth/slack');
     });
   }
 }
@@ -2772,6 +2970,94 @@ function obBack() {
   if (obStepIdx > 0) { obStepIdx--; renderObStep(); }
 }
 
+// ---------- Feature tour ----------
+const TOUR_STEPS = [
+  {
+    selector: '.sidebar',
+    title: 'Monthly overview',
+    desc: 'Browse months with the arrows in the toolbar. Colored dots on each day show GitHub, Slack, and email activity at a glance. Select any day to explore it. The weekly summary at the bottom tracks your logged hours per project.',
+    preferRight: true,
+  },
+  {
+    selector: '.day-panel',
+    title: 'Daily timeline',
+    desc: 'All your activity for the selected day in one chronological view — GitHub commits, pull requests, Slack messages, calendar meetings, and emails.\n\nClick any event to create a draft Tempo entry with the time pre-filled. The right column on the timeline shows your already-logged Tempo worklogs and calendar meetings.',
+    preferRight: true,
+  },
+  {
+    selector: '.tempo-panel',
+    title: 'Draft entries & sending',
+    desc: 'Build your Tempo log here. Assign Jira issue keys, adjust durations, and add descriptions. When ready, hit Send to Tempo — all drafts are submitted at once.\n\nFavorites at the top let you instantly re-log recurring tasks to any day.',
+    preferLeft: true,
+  },
+];
+
+let _tourStepIdx = 0;
+
+function showTour() {
+  if (localStorage.getItem('workpulse:tour-done')) return;
+  _tourStepIdx = 0;
+  _renderTourStep();
+}
+
+function _renderTourStep() {
+  const step = TOUR_STEPS[_tourStepIdx];
+
+  // Clear previous highlight
+  document.querySelectorAll('.tour-target').forEach((el) => el.classList.remove('tour-target'));
+
+  const target = document.querySelector(step.selector);
+  if (!target) { _endTour(); return; }
+
+  document.getElementById('tour-overlay').classList.remove('hidden');
+  target.classList.add('tour-target');
+
+  const isLast = _tourStepIdx === TOUR_STEPS.length - 1;
+  const card = document.getElementById('tour-card');
+  card.classList.remove('hidden');
+  card.innerHTML = `
+    <div class="tour-step-label">Step ${_tourStepIdx + 1} of ${TOUR_STEPS.length}</div>
+    <div class="tour-title">${step.title}</div>
+    <div class="tour-desc">${escapeHtml(step.desc).replace(/\n\n/g, '<br><br>')}</div>
+    <div class="tour-nav">
+      <button class="tour-skip-btn">Skip tour</button>
+      <button class="tour-next-btn primary">${isLast ? 'Done ✓' : 'Next →'}</button>
+    </div>`;
+
+  // Position card: prefer right of target, fall back to left, then below
+  const rect   = target.getBoundingClientRect();
+  const cardW  = 300;
+  const gap    = 24;
+  let left, top;
+
+  if (step.preferLeft && rect.left - gap - cardW >= 8) {
+    left = rect.left - gap - cardW;
+  } else if (rect.right + gap + cardW <= window.innerWidth - 8) {
+    left = rect.right + gap;
+  } else {
+    left = Math.max(8, rect.left);
+  }
+  // Vertically center on the target, clamped to viewport
+  const cardH = 240;
+  top = Math.max(12, Math.min(rect.top + rect.height / 2 - cardH / 2, window.innerHeight - cardH - 12));
+
+  card.style.left = `${left}px`;
+  card.style.top  = `${top}px`;
+
+  card.querySelector('.tour-next-btn').addEventListener('click', () => {
+    _tourStepIdx++;
+    if (_tourStepIdx >= TOUR_STEPS.length) _endTour(); else _renderTourStep();
+  });
+  card.querySelector('.tour-skip-btn').addEventListener('click', _endTour);
+}
+
+function _endTour() {
+  document.querySelectorAll('.tour-target').forEach((el) => el.classList.remove('tour-target'));
+  document.getElementById('tour-overlay').classList.add('hidden');
+  document.getElementById('tour-card').classList.add('hidden');
+  localStorage.setItem('workpulse:tour-done', '1');
+}
+
 // ---------- Boot ----------
 async function boot() {
   // Wire toolbar
@@ -2786,9 +3072,27 @@ async function boot() {
   document.getElementById('settings-btn').addEventListener('click', openSettings);
   document.getElementById('settings-close').addEventListener('click', closeSettings);
   document.getElementById('settings-save').addEventListener('click', saveSettings);
+  document.getElementById('settings-github-connect').addEventListener('click', () => {
+    _oauthNavigate('/auth/github');
+  });
+  document.getElementById('settings-github-disconnect').addEventListener('click', async () => {
+    await api('/auth/github/disconnect', { method: 'POST' });
+    await loadHealth();
+    updateGithubStatusUI();
+    toast('GitHub disconnected.', 'ok');
+  });
+  document.getElementById('settings-slack-connect').addEventListener('click', () => {
+    _oauthNavigate('/auth/slack');
+  });
+  document.getElementById('settings-slack-disconnect').addEventListener('click', async () => {
+    await api('/auth/slack/disconnect', { method: 'POST' });
+    await loadHealth();
+    updateSlackStatusUI();
+    toast('Slack disconnected.', 'ok');
+  });
   document.getElementById('settings-google-connect').addEventListener('click', async () => {
     await saveSettings();
-    window.location.href = '/auth/google';
+    _oauthNavigate('/auth/google');
   });
   document.getElementById('settings-google-disconnect').addEventListener('click', async () => {
     await api('/auth/google/disconnect', { method: 'POST' });
@@ -2796,7 +3100,10 @@ async function boot() {
     updateGoogleStatusUI();
     toast('Google disconnected.', 'ok');
   });
-  document.getElementById('onboarding-btn').addEventListener('click', () => showOnboarding(0));
+  document.getElementById('onboarding-btn').addEventListener('click', () => {
+    localStorage.removeItem('workpulse:tour-done');
+    showTour();
+  });
   document.getElementById('settings-onboarding-btn').addEventListener('click', () => { closeSettings(); showOnboarding(0); });
   document.getElementById('ob-back').addEventListener('click', obBack);
   document.getElementById('ob-next').addEventListener('click', obNext);
@@ -2830,20 +3137,66 @@ async function boot() {
 
   // Handle Google OAuth redirect params
   const _sp = new URLSearchParams(window.location.search);
-  if (_sp.has('google')) {
+  const _obStep = localStorage.getItem('workpulse:onboarding-step');
+  const _resumeOnboarding = (toastMsg) => {
     history.replaceState(null, '', window.location.pathname);
-    const obInProgress = localStorage.getItem('workpulse:onboarding-step');
-    if (obInProgress) {
+    if (_obStep) {
       localStorage.removeItem('workpulse:onboarding-step');
       _activeObSteps = [...OB_STEPS];
       showOnboarding(OB_STEPS.indexOf('done'));
     } else {
-      toast('Google connected.', 'ok');
+      toast(toastMsg, 'ok');
     }
+  };
+
+  if (_sp.has('google')) {
+    _resumeOnboarding('Google connected.');
   } else if (_sp.has('google_error')) {
-    toast('Google error: ' + _sp.get('google_error'), 'err');
+    toast('Google connection failed: ' + _sp.get('google_error'), 'err');
+    history.replaceState(null, '', window.location.pathname);
+  } else if (_sp.has('github')) {
+    await loadHealth(); renderStatusPill();
+    _resumeOnboarding(`GitHub connected as ${state.health.githubUsername || 'user'}.`);
+  } else if (_sp.has('github_error')) {
+    toast('GitHub connection failed: ' + _sp.get('github_error'), 'err');
+    history.replaceState(null, '', window.location.pathname);
+  } else if (_sp.has('slack')) {
+    await loadHealth(); renderStatusPill();
+    _resumeOnboarding('Slack connected.');
+  } else if (_sp.has('slack_error')) {
+    toast('Slack connection failed: ' + _sp.get('slack_error'), 'err');
     history.replaceState(null, '', window.location.pathname);
   }
+
+  // SSE: receive OAuth results pushed from server (used in Electron mode to avoid URL-scheme dialogs)
+  const _oauthSse = new EventSource('/api/oauth/events');
+  _oauthSse.onmessage = async (e) => {
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+    await loadHealth();
+    updateGithubStatusUI();
+    updateSlackStatusUI();
+    updateGoogleStatusUI();
+    renderStatusPill();
+    // Read localStorage fresh — in Electron mode the page never navigates so _obStep (captured at
+    // boot) would always be null even when the user started OAuth from inside the onboarding flow.
+    function _sseResume(msg) {
+      const step = localStorage.getItem('workpulse:onboarding-step');
+      if (step) {
+        localStorage.removeItem('workpulse:onboarding-step');
+        _activeObSteps = [...OB_STEPS];
+        showOnboarding(OB_STEPS.indexOf('done'));
+      } else {
+        toast(msg, 'ok');
+      }
+    }
+    if (data.github === 'connected')  _sseResume(`GitHub connected as ${state.health.githubUsername || 'user'}.`);
+    else if (data.slack === 'connected')   _sseResume('Slack connected.');
+    else if (data.google === 'connected')  _sseResume('Google connected.');
+    else if (data.github_error)  toast('GitHub connection failed: ' + data.github_error, 'err');
+    else if (data.slack_error)   toast('Slack connection failed: '  + data.slack_error,  'err');
+    else if (data.google_error)  toast('Google connection failed: ' + data.google_error, 'err');
+  };
 
   if (_sp.has('demo')) {
     initDemoMode();
@@ -2862,16 +3215,28 @@ async function boot() {
 
   try {
     await Promise.all([loadHealth(), loadMappings()]);
-    await Promise.all([loadEvents(), loadWorklogs()]);
-    renderCalendar();
-    pickInitialDay();
-    // Auto-show onboarding on first launch (filtered to only unconfigured steps)
-    if (!localStorage.getItem('workpulse:onboarding-done') && !_sp.has('google')) {
-      showOnboardingFiltered();
-    }
   } catch (e) {
     toast('Boot failed: ' + e.message, 'err');
+    return;
   }
+
+  const _cfg = state.health.config || {};
+  const _anythingConfigured = _cfg.github || _cfg.slack || _cfg.jira || state.health.googleConnected;
+  const _oauthReturn = _sp.has('google') || _sp.has('github') || _sp.has('slack');
+
+  if (!_anythingConfigured && !_oauthReturn) {
+    // Nothing configured at all — show onboarding, skip data loading.
+    showOnboardingFiltered();
+    return;
+  }
+
+  if (!localStorage.getItem('workpulse:onboarding-done') && !_oauthReturn) {
+    showOnboardingFiltered();
+  }
+
+  await Promise.allSettled([loadEvents(), loadWorklogs()]);
+  renderCalendar();
+  pickInitialDay();
 }
 
 // ---------- Demo mode ----------

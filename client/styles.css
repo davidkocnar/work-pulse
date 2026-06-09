@@ -261,7 +261,7 @@ code { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 .wb-block {
   position: absolute; left: 46px; right: 4px;
   border-radius: 5px;
-  background: rgba(95, 214, 160, 0.1);
+  background: rgba(95, 214, 160, 0.15);
   border: 1px solid rgba(95, 214, 160, 0.35);
   padding: 3px 6px 10px; overflow: visible;
   display: flex; flex-direction: column; gap: 1px; align-items: flex-end; text-align: right;
@@ -428,7 +428,6 @@ code { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
 .event .proj.has { color: var(--accent-2); border-color: rgba(126, 226, 193, 0.3); }
 .event .proj.miss { color: var(--warn); border-color: rgba(246, 193, 119, 0.3); }
-
 
 /* ---- Calendar loading ---- */
 @keyframes cal-pulse {
@@ -674,10 +673,13 @@ code { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   font-family: "JetBrains Mono", ui-monospace, monospace;
 }
 .bub-tt-foot {
-  padding: 6px 10px; border-top: 1px solid var(--border);
-  font-size: 11px; color: var(--fg-muted); cursor: pointer;
+  padding: 8px 10px; border-top: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
 }
-.bub-tooltip:hover .bub-tt-foot { color: var(--accent); }
+.bub-tt-foot-btn { width: 100%; }
+.bub-tt-foot-added {
+  font-size: 12px; font-weight: 600; color: var(--accent); text-align: center; width: 100%;
+}
 
 .compact-popup {
   position: fixed; z-index: 300;
@@ -761,12 +763,13 @@ code { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   pointer-events: none; z-index: 3;
 }
 .wb-block:hover .wb-block-actions { opacity: 1; pointer-events: auto; }
-.wb-btn-edit, .wb-btn-del {
+.wb-btn-edit, .wb-btn-dup, .wb-btn-del {
   padding: 1px 4px; border-radius: 3px; font-size: 10px; line-height: 1.4;
   border: 1px solid rgba(255,255,255,0.15); background: rgba(14,16,20,0.75);
   color: var(--fg-dim); cursor: pointer;
 }
 .wb-btn-edit:hover { border-color: var(--accent); color: var(--accent); background: rgba(14,16,20,0.9); }
+.wb-btn-dup:hover  { border-color: var(--fg-dim); color: var(--fg);     background: rgba(14,16,20,0.9); }
 .wb-btn-del:hover  { border-color: var(--err);    color: var(--err);    background: rgba(14,16,20,0.9); }
 
 /* Worklog edit popup */
@@ -910,3 +913,45 @@ input[name="issue"].issue-invalid {
   background: transparent; border-color: transparent; color: var(--fg-dim);
 }
 #onboarding-btn:hover { color: var(--fg); border-color: var(--border); background: var(--bg-elev-2); }
+
+/* ---- Feature tour ---- */
+#tour-overlay.hidden, #tour-card.hidden { display: none; }
+#tour-overlay {
+  position: fixed; inset: 0; z-index: 8000;
+  background: rgba(0,0,0,0.58);
+  pointer-events: all;
+}
+.tour-target {
+  position: relative !important;
+  z-index: 8001 !important;
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 6px;
+  pointer-events: none !important;
+}
+.tour-card {
+  position: fixed; z-index: 8002;
+  background: var(--bg-elev); border: 1px solid var(--border-strong);
+  border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+  width: 300px; padding: 20px 22px;
+}
+.tour-step-label {
+  font-size: 10px; font-weight: 600; letter-spacing: .08em;
+  color: var(--accent); text-transform: uppercase; margin-bottom: 8px;
+}
+.tour-title {
+  font-size: 16px; font-weight: 700; color: var(--fg); margin-bottom: 10px;
+}
+.tour-desc {
+  font-size: 13px; line-height: 1.6; color: var(--fg-dim);
+}
+.tour-nav {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
+}
+.tour-skip-btn {
+  background: none; border: none; color: var(--fg-muted);
+  font-size: 12px; padding: 4px 0; cursor: pointer;
+}
+.tour-skip-btn:hover { color: var(--fg-dim); background: none; border-color: transparent; }
+.tour-next-btn { min-width: 90px; }

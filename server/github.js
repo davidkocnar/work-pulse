@@ -6,6 +6,16 @@ const PER_PAGE = 100;
 const MAX_PAGES = 10;
 const HYDRATE_CONCURRENCY = 6;
 
+function parseGitHubError(status, body) {
+  let msg = '';
+  try { msg = JSON.parse(body)?.message || ''; } catch { /* not JSON */ }
+  if (status === 401) return 'Invalid GitHub token — check your token in Settings.';
+  if (status === 403) return msg.includes('rate limit') ? 'GitHub rate limit reached — try again later.' : 'GitHub access denied — check your token permissions.';
+  if (status === 404) return 'GitHub resource not found — check your username in Settings.';
+  if (status === 422) return `GitHub validation error: ${msg || 'invalid request'}.`;
+  return msg || `GitHub error ${status}.`;
+}
+
 async function ghFetch(url, token) {
   const res = await fetch(url, {
     headers: {
@@ -17,7 +27,7 @@ async function ghFetch(url, token) {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    const err = new Error(`GitHub API ${res.status}: ${body.slice(0, 200)}`);
+    const err = new Error(parseGitHubError(res.status, body));
     err.status = res.status;
     throw err;
   }
@@ -63,8 +73,13 @@ async function hydrate(events, token) {
         const url = `https://api.github.com/repos/${repo}/compare/${encodeURIComponent(before)}...${encodeURIComponent(head)}`;
         ev._compare = await fetchCached(url, token);
       } else if (head) {
-        const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(head)}`;
-        ev._commit = await fetchCached(url, token);
+        // New branch (before is zero-sha): fetch the N pushed commits from tip
+        const size = Math.min(p.size || 1, 20);
+        const url = size > 1
+          ? `https://api.github.com/repos/${repo}/commits?sha=${encodeURIComponent(head)}&per_page=${size}`
+          : `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(head)}`;
+        const data = await fetchCached(url, token);
+        ev._commits = Array.isArray(data) ? data : (data ? [data] : []);
       }
     }
   });
@@ -89,11 +104,11 @@ function transform(event) {
   switch (event.type) {
     case 'PushEvent': {
       const branch = stripBranch(p.ref);
-      // Prefer commits from compare API if hydrated
+      // Prefer commits from compare API, then new-branch list, then fallback
       const commits = (event._compare && event._compare.commits)
-        || (event._commit ? [event._commit] : []);
+        || event._commits
+        || [];
       if (commits.length === 0) {
-        // Fallback: synthesize a single entry with just the head SHA
         if (p.head) {
           return [{
             ...base,
@@ -111,8 +126,11 @@ function transform(event) {
         const sha = c.sha || c.id || (c.commit && c.commit.tree && c.commit.tree.sha);
         const message = (c.commit && c.commit.message) || c.message || '';
         const htmlUrl = c.html_url || (sha && repo ? `${repoUrl}/commit/${sha}` : null);
+        // Use actual commit author date instead of push event time
+        const commitTime = c.commit?.author?.date || c.commit?.committer?.date || time;
         return {
           ...base,
+          time: commitTime,
           id: `${event.id}-${sha || i}`,
           kind: 'commit',
           title: message.split('\n')[0] || `commit ${shortenSha(sha)}`,

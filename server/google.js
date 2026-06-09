@@ -81,11 +81,20 @@ async function getAccessToken(clientId, clientSecret) {
   return tokens.access_token;
 }
 
+function parseGoogleError(status, body) {
+  let msg = '';
+  try { msg = JSON.parse(body)?.error?.message || ''; } catch { /* not JSON */ }
+  if (status === 401) return 'Google session expired — reconnect Google in Settings.';
+  if (status === 403) return msg || 'Google access denied — check your OAuth scopes.';
+  if (status === 429) return 'Google rate limit reached — try again in a moment.';
+  return msg || `Google error ${status}.`;
+}
+
 async function gGet(url, accessToken) {
   const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    const err = new Error(`Google API ${res.status}: ${body.slice(0, 200)}`);
+    const err = new Error(parseGoogleError(res.status, body));
     err.status = res.status;
     throw err;
   }

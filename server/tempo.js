@@ -7,6 +7,31 @@ function jiraAuthHeader(email, apiToken) {
   return 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64');
 }
 
+function parseJiraError(status, body) {
+  let msg = '';
+  try {
+    const j = JSON.parse(body);
+    msg = (Array.isArray(j.errorMessages) && j.errorMessages[0])
+      || (j.errors && Object.values(j.errors)[0])
+      || '';
+  } catch { /* not JSON */ }
+  if (status === 401) return 'Invalid Jira credentials — check your email and API token in Settings.';
+  if (status === 403) return 'Jira access denied — you may not have permission for this project.';
+  if (status === 404) return msg || 'Jira issue not found.';
+  if (status === 429) return 'Jira rate limit reached — try again in a moment.';
+  return msg || `Jira error ${status}.`;
+}
+
+function parseTempoError(status, body) {
+  let msg = '';
+  try { msg = JSON.parse(body)?.message || ''; } catch { /* not JSON */ }
+  if (status === 401) return 'Invalid Tempo token — check your Tempo token in Settings.';
+  if (status === 403) return 'Tempo access denied — check your token permissions.';
+  if (status === 404) return 'Tempo resource not found.';
+  if (status === 429) return 'Tempo rate limit reached — try again in a moment.';
+  return msg || `Tempo error ${status}.`;
+}
+
 async function jiraGet(pathname, { baseUrl, email, apiToken }) {
   const url = `${baseUrl.replace(/\/$/, '')}${pathname}`;
   const res = await fetch(url, {
@@ -18,7 +43,7 @@ async function jiraGet(pathname, { baseUrl, email, apiToken }) {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    const err = new Error(`Jira ${res.status}: ${body.slice(0, 200)}`);
+    const err = new Error(parseJiraError(res.status, body));
     err.status = res.status;
     throw err;
   }
@@ -143,7 +168,7 @@ async function createWorklog({ issueKey, date, timeSeconds, description, startTi
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`Tempo ${res.status}: ${text.slice(0, 300)}`);
+    throw new Error(parseTempoError(res.status, text));
   }
   return res.json();
 }
@@ -171,7 +196,7 @@ async function fetchWorklogsRange({ from, to }, env) {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`Tempo ${res.status}: ${text.slice(0, 300)}`);
+      throw new Error(parseTempoError(res.status, text));
     }
     const data = await res.json();
     const results = data.results || [];
@@ -303,7 +328,7 @@ async function updateWorklog({ id, issueId, startDate, startTime, timeSeconds, d
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    const err = new Error(`Tempo ${res.status}: ${text.slice(0, 300)}`);
+    const err = new Error(parseTempoError(res.status, text));
     err.status = res.status;
     throw err;
   }
@@ -319,7 +344,7 @@ async function deleteWorklog({ id }, env) {
   });
   if (!res.ok && res.status !== 204) {
     const text = await res.text().catch(() => '');
-    const err = new Error(`Tempo ${res.status}: ${text.slice(0, 300)}`);
+    const err = new Error(parseTempoError(res.status, text));
     err.status = res.status;
     throw err;
   }

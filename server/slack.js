@@ -4,6 +4,16 @@ const TTL_MS = 5 * 60 * 1000;
 const PER_PAGE = 100;
 const MAX_PAGES = 20;
 
+const SLACK_ERROR_MESSAGES = {
+  invalid_auth:      'Invalid Slack token — check your token in Settings.',
+  not_authed:        'Slack token missing — add your token in Settings.',
+  account_inactive:  'Slack account is inactive.',
+  token_revoked:     'Slack token has been revoked — generate a new one in Settings.',
+  no_permission:     'Slack token lacks the required permission scope.',
+  missing_scope:     'Slack token lacks the required permission scope.',
+  ratelimited:       'Slack rate limit reached — try again in a moment.',
+};
+
 async function slackCall(method, params, token) {
   const url = new URL(`https://slack.com/api/${method}`);
   for (const [k, v] of Object.entries(params)) {
@@ -16,12 +26,12 @@ async function slackCall(method, params, token) {
     },
   });
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Slack HTTP ${res.status}: ${body.slice(0, 200)}`);
+    throw new Error(`Slack HTTP error ${res.status}.`);
   }
   const data = await res.json();
   if (!data.ok) {
-    throw new Error(`Slack API error: ${data.error || 'unknown'}`);
+    const code = data.error || 'unknown';
+    throw new Error(SLACK_ERROR_MESSAGES[code] || `Slack error: ${code}.`);
   }
   return data;
 }

@@ -6,3 +6,5 @@ mappings.json
 .idea/
 .google-tokens.json
 workpulse-config.json
+server/app-defaults.js
+dist/

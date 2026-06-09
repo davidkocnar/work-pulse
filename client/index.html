@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>WorkPulse</title>
+<link rel="icon" type="image/png" href="favicon.png" />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -127,28 +128,38 @@
 
       <div class="settings-section">
         <h4>GitHub</h4>
-        <div class="settings-row"><label>Username</label><input id="cfg-github-username" type="text" placeholder="GITHUB_USERNAME" autocomplete="off" /></div>
-        <div class="settings-row"><label>Token</label><input id="cfg-github-token" type="password" placeholder="GITHUB_TOKEN" autocomplete="off" /></div>
+        <div id="settings-github-oauth" style="display:none">
+          <div id="settings-github-status" class="settings-google-status"></div>
+          <div class="settings-google-actions">
+            <button id="settings-github-connect" class="primary">Connect GitHub</button>
+            <button id="settings-github-disconnect">Disconnect</button>
+          </div>
+        </div>
+        <div id="settings-github-manual">
+          <div class="settings-row"><label>Username</label><input id="cfg-github-username" type="text" placeholder="GITHUB_USERNAME" autocomplete="off" /></div>
+          <div class="settings-row"><label>Token</label><input id="cfg-github-token" type="password" placeholder="GITHUB_TOKEN" autocomplete="off" /></div>
+        </div>
       </div>
 
       <div class="settings-section">
         <h4>Slack</h4>
-        <div class="settings-row"><label>Token</label><input id="cfg-slack-token" type="password" placeholder="SLACK_TOKEN (xoxp-…)" autocomplete="off" /></div>
-      </div>
-
-      <div class="settings-section">
-        <h4>Jira / Tempo</h4>
-        <div class="settings-row"><label>Base URL</label><input id="cfg-jira-url" type="text" placeholder="https://your-org.atlassian.net" autocomplete="off" /></div>
-        <div class="settings-row"><label>Email</label><input id="cfg-jira-email" type="text" placeholder="you@company.com" autocomplete="off" /></div>
-        <div class="settings-row"><label>Jira API Token</label><input id="cfg-jira-token" type="password" placeholder="JIRA_API_TOKEN" autocomplete="off" /></div>
-        <div class="settings-row"><label>Tempo Token</label><input id="cfg-tempo-token" type="password" placeholder="TEMPO_TOKEN" autocomplete="off" /></div>
+        <div id="settings-slack-oauth" style="display:none">
+          <div id="settings-slack-status" class="settings-google-status"></div>
+          <div class="settings-google-actions">
+            <button id="settings-slack-connect" class="primary">Connect Slack</button>
+            <button id="settings-slack-disconnect">Disconnect</button>
+          </div>
+        </div>
+        <div id="settings-slack-manual" style="display:none">
+          <div class="settings-row"><label>Token</label><input id="cfg-slack-token" type="password" placeholder="SLACK_TOKEN (xoxp-…)" autocomplete="off" /></div>
+        </div>
       </div>
 
       <div class="settings-section">
         <h4>Google (Calendar + Gmail)</h4>
         <p class="muted small" style="margin:0 0 8px">
           Create an OAuth 2.0 client at <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud Console</a>
-          (type: Web application, redirect URI: <code>http://localhost:3333/auth/google/callback</code>).
+          (type: Web application, redirect URI: <code id="google-redirect-uri-settings">…/auth/google/callback</code>).
           Enable <em>Google Calendar API</em> and <em>Gmail API</em> in the project.
         </p>
         <div class="settings-row"><label>Client ID</label><input id="cfg-google-id" type="text" placeholder="GOOGLE_CLIENT_ID" autocomplete="off" /></div>
@@ -160,9 +171,16 @@
         </div>
       </div>
 
+      <div class="settings-section">
+        <h4>Jira / Tempo</h4>
+        <div class="settings-row"><label>Base URL</label><input id="cfg-jira-url" type="text" placeholder="https://your-org.atlassian.net" autocomplete="off" /></div>
+        <div class="settings-row"><label>Email</label><input id="cfg-jira-email" type="text" placeholder="you@company.com" autocomplete="off" /></div>
+        <div class="settings-row"><label>Jira API Token</label><input id="cfg-jira-token" type="password" placeholder="JIRA_API_TOKEN" autocomplete="off" /></div>
+        <div class="settings-row"><label>Tempo Token</label><input id="cfg-tempo-token" type="password" placeholder="TEMPO_TOKEN" autocomplete="off" /></div>
+      </div>
+
       <p class="muted small settings-note">
-        Leave a field blank to keep the value from <code>.env</code>. Saved values are stored in
-        <code>workpulse-config.json</code> (gitignored, takes precedence over .env).
+        Settings are saved locally in <code>workpulse-config.json</code>.
       </p>
       <div id="settings-feedback" class="feedback"></div>
       <div class="modal-foot">
@@ -184,6 +202,9 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
+
+  <div id="tour-overlay" class="hidden"></div>
+  <div id="tour-card" class="tour-card hidden"></div>
 
   <script src="app.js" type="module"></script>
 </body>

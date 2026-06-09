@@ -12,27 +12,84 @@ const mappings    = require('./mappings');
 const google      = require('./google');
 const configStore = require('./config-store');
 
+// OAuth app credentials bundled at build time (gitignored, generated from .env before dist).
+// Falls back gracefully when the file doesn't exist (dev without the file, or open-source build).
+let _bundled = {};
+try { _bundled = require('./app-defaults'); } catch {}
+
 const PORT = parseInt(process.env.PORT || '3333', 10);
 const GOOGLE_REDIRECT = `http://localhost:${PORT}/auth/google/callback`;
+const GITHUB_REDIRECT = `http://localhost:${PORT}/auth/github/callback`;
+const SLACK_REDIRECT  = `http://localhost:${PORT}/auth/slack/callback`;
 
 function buildEnv() {
   const c = configStore.read();
+  const e = process.env;
+  const b = _bundled;
   return {
-    githubToken:        c.GITHUB_TOKEN        || process.env.GITHUB_TOKEN,
-    githubUsername:     c.GITHUB_USERNAME     || process.env.GITHUB_USERNAME,
-    slackToken:         c.SLACK_TOKEN         || process.env.SLACK_TOKEN,
-    baseUrl:            c.JIRA_BASE_URL       || process.env.JIRA_BASE_URL,
-    email:              c.JIRA_EMAIL          || process.env.JIRA_EMAIL,
-    apiToken:           c.JIRA_API_TOKEN      || process.env.JIRA_API_TOKEN,
-    tempoToken:         c.TEMPO_TOKEN         || process.env.TEMPO_TOKEN,
-    googleClientId:     c.GOOGLE_CLIENT_ID    || process.env.GOOGLE_CLIENT_ID,
-    googleClientSecret: c.GOOGLE_CLIENT_SECRET|| process.env.GOOGLE_CLIENT_SECRET,
+    githubToken:        c.GITHUB_TOKEN         || e.GITHUB_TOKEN,
+    githubUsername:     c.GITHUB_USERNAME      || e.GITHUB_USERNAME,
+    githubClientId:     c.GITHUB_CLIENT_ID     || e.GITHUB_CLIENT_ID     || b.GITHUB_CLIENT_ID,
+    githubClientSecret: c.GITHUB_CLIENT_SECRET || e.GITHUB_CLIENT_SECRET || b.GITHUB_CLIENT_SECRET,
+    slackToken:         c.SLACK_TOKEN          || e.SLACK_TOKEN,
+    slackClientId:      c.SLACK_CLIENT_ID      || e.SLACK_CLIENT_ID      || b.SLACK_CLIENT_ID,
+    slackClientSecret:  c.SLACK_CLIENT_SECRET  || e.SLACK_CLIENT_SECRET  || b.SLACK_CLIENT_SECRET,
+    baseUrl:            c.JIRA_BASE_URL        || e.JIRA_BASE_URL,
+    email:              c.JIRA_EMAIL           || e.JIRA_EMAIL,
+    apiToken:           c.JIRA_API_TOKEN       || e.JIRA_API_TOKEN,
+    tempoToken:         c.TEMPO_TOKEN          || e.TEMPO_TOKEN,
+    googleClientId:     c.GOOGLE_CLIENT_ID     || e.GOOGLE_CLIENT_ID     || b.GOOGLE_CLIENT_ID,
+    googleClientSecret: c.GOOGLE_CLIENT_SECRET || e.GOOGLE_CLIENT_SECRET || b.GOOGLE_CLIENT_SECRET,
   };
 }
 let env = buildEnv();
 
+// In Electron mode redirect back via custom URL scheme so the browser hands focus to the app.
+// In plain server mode redirect to the local web page as before.
+function oauthReturn(query) {
+  return process.env.WORKPULSE_ELECTRON === '1'
+    ? `workpulse://oauth?${query}`
+    : `/?${query}`;
+}
+
+// ---------- OAuth SSE (push result to open Electron renderer) ----------
+const _sseClients = new Set();
+let _focusCallback = null;
+
+// Called by electron/main.js to register the window-focus hook
+function setFocusCallback(fn) { _focusCallback = fn; }
+
+function _broadcastOAuth(data) {
+  const msg = `data: ${JSON.stringify(data)}\n\n`;
+  for (const res of _sseClients) { try { res.write(msg); } catch { /* ignore */ } }
+  if (_focusCallback) _focusCallback();
+}
+
+function _oauthSuccessPage(message) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>WorkPulse</title>
+<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0f1117;color:#e2e8f0}
+.card{text-align:center;padding:40px;border-radius:12px;background:#1a1f2e;max-width:360px}
+h2{margin:0 0 8px;color:#fff}p{margin:0 0 24px;color:#94a3b8;font-size:14px}
+button{background:#6366f1;color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:14px;cursor:pointer}</style>
+</head><body><div class="card">
+<h2>✓ ${message}</h2>
+<p>You can close this tab and return to WorkPulse.</p>
+<button onclick="window.close()">Close tab</button>
+</div></body></html>`;
+}
+
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+
+app.get('/api/oauth/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  _sseClients.add(res);
+  req.on('close', () => _sseClients.delete(res));
+});
 
 // ---------- Health ----------
 app.get('/api/health', (req, res) => {
@@ -48,6 +105,9 @@ app.get('/api/health', (req, res) => {
     },
     googleConnected:   gs.connected,
     githubUsername:    env.githubUsername || null,
+    githubOAuth:       Boolean(env.githubClientId),
+    slackOAuth:        Boolean(env.slackClientId),
+    electronMode:      process.env.WORKPULSE_ELECTRON === '1',
   });
 });
 
@@ -219,6 +279,86 @@ app.put('/api/config', (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// ---------- GitHub OAuth ----------
+app.get('/auth/github', (req, res) => {
+  if (!env.githubClientId)
+    return res.status(400).send('GITHUB_CLIENT_ID not configured — ask your admin to set it up.');
+  const url = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(env.githubClientId)}&scope=read%3Auser%2Crepo&redirect_uri=${encodeURIComponent(GITHUB_REDIRECT)}`;
+  res.redirect(url);
+});
+
+app.get('/auth/github/callback', async (req, res) => {
+  const { code, error } = req.query;
+  if (error) return res.redirect(`/?github_error=${encodeURIComponent(error)}`);
+  if (!code)  return res.redirect(`/?github_error=${encodeURIComponent('no code returned')}`);
+  try {
+    const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'WorkPulse' },
+      body: JSON.stringify({ client_id: env.githubClientId, client_secret: env.githubClientSecret, code, redirect_uri: GITHUB_REDIRECT }),
+    });
+    const td = await tokenRes.json();
+    if (td.error) throw new Error(td.error_description || td.error);
+    const userRes = await fetch('https://api.github.com/user', {
+      headers: { Authorization: `Bearer ${td.access_token}`, 'User-Agent': 'WorkPulse', Accept: 'application/vnd.github+json' },
+    });
+    const user = await userRes.json();
+    configStore.merge({ GITHUB_TOKEN: td.access_token, GITHUB_USERNAME: user.login });
+    env = buildEnv();
+    if (process.env.WORKPULSE_ELECTRON === '1') {
+      _broadcastOAuth({ github: 'connected', username: user.login });
+      res.send(_oauthSuccessPage('GitHub connected'));
+    } else {
+      res.redirect('/?github=connected');
+    }
+  } catch (e) {
+    if (process.env.WORKPULSE_ELECTRON === '1') {
+      _broadcastOAuth({ github_error: e.message });
+      res.send(_oauthSuccessPage('GitHub connection failed'));
+    } else {
+      res.redirect(`/?github_error=${encodeURIComponent(e.message)}`);
+    }
+  }
+});
+
+// ---------- Slack OAuth ----------
+app.get('/auth/slack', (req, res) => {
+  if (!env.slackClientId)
+    return res.status(400).send('SLACK_CLIENT_ID not configured — ask your admin to set it up.');
+  const scopes = 'search:read,users:read,channels:read,im:read,mpim:read';
+  const url = `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(env.slackClientId)}&user_scope=${encodeURIComponent(scopes)}&redirect_uri=${encodeURIComponent(SLACK_REDIRECT)}`;
+  res.redirect(url);
+});
+
+app.get('/auth/slack/callback', async (req, res) => {
+  const { code, error } = req.query;
+  if (error) return res.redirect(`/?slack_error=${encodeURIComponent(error)}`);
+  if (!code)  return res.redirect(`/?slack_error=${encodeURIComponent('no code returned')}`);
+  try {
+    const params = new URLSearchParams({ client_id: env.slackClientId, client_secret: env.slackClientSecret, code, redirect_uri: SLACK_REDIRECT });
+    const tokenRes = await fetch(`https://slack.com/api/oauth.v2.access?${params}`, { headers: { Accept: 'application/json' } });
+    const data = await tokenRes.json();
+    if (!data.ok) throw new Error(data.error || 'OAuth failed');
+    const token = data.authed_user?.access_token;
+    if (!token) throw new Error('No user token returned — ensure user scopes are configured in your Slack app.');
+    configStore.merge({ SLACK_TOKEN: token });
+    env = buildEnv();
+    if (process.env.WORKPULSE_ELECTRON === '1') {
+      _broadcastOAuth({ slack: 'connected' });
+      res.send(_oauthSuccessPage('Slack connected'));
+    } else {
+      res.redirect('/?slack=connected');
+    }
+  } catch (e) {
+    if (process.env.WORKPULSE_ELECTRON === '1') {
+      _broadcastOAuth({ slack_error: e.message });
+      res.send(_oauthSuccessPage('Slack connection failed'));
+    } else {
+      res.redirect(`/?slack_error=${encodeURIComponent(e.message)}`);
+    }
+  }
+});
+
 // ---------- Google OAuth ----------
 app.get('/auth/google', (req, res) => {
   if (!env.googleClientId)
@@ -232,14 +372,36 @@ app.get('/auth/google/callback', async (req, res) => {
   if (!code)  return res.redirect(`/?google_error=${encodeURIComponent('no code returned')}`);
   try {
     await google.exchangeCode(env.googleClientId, env.googleClientSecret, GOOGLE_REDIRECT, code);
-    res.redirect('/?google=connected');
+    if (process.env.WORKPULSE_ELECTRON === '1') {
+      _broadcastOAuth({ google: 'connected' });
+      res.send(_oauthSuccessPage('Google connected'));
+    } else {
+      res.redirect('/?google=connected');
+    }
   } catch (e) {
-    res.redirect(`/?google_error=${encodeURIComponent(e.message)}`);
+    if (process.env.WORKPULSE_ELECTRON === '1') {
+      _broadcastOAuth({ google_error: e.message });
+      res.send(_oauthSuccessPage('Google connection failed'));
+    } else {
+      res.redirect(`/?google_error=${encodeURIComponent(e.message)}`);
+    }
   }
 });
 
 app.post('/auth/google/disconnect', (req, res) => {
   google.clearTokens();
+  res.json({ ok: true });
+});
+
+app.post('/auth/github/disconnect', (req, res) => {
+  configStore.remove(['GITHUB_TOKEN', 'GITHUB_USERNAME']);
+  env = buildEnv();
+  res.json({ ok: true });
+});
+
+app.post('/auth/slack/disconnect', (req, res) => {
+  configStore.remove(['SLACK_TOKEN']);
+  env = buildEnv();
   res.json({ ok: true });
 });
 
@@ -269,3 +431,5 @@ const server = app.listen(PORT, () => {
 
 process.on('SIGINT',  () => server.close(() => process.exit(0)));
 process.on('SIGTERM', () => server.close(() => process.exit(0)));
+
+module.exports = { setFocusCallback };
