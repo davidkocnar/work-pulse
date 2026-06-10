@@ -62,10 +62,19 @@ code { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   border-bottom: 1px solid var(--border);
   height: 44px;
 }
+.electron .topbar {
+  padding-left: 80px;
+  -webkit-app-region: drag;
+}
+.electron .topbar button,
+.electron .topbar input,
+.electron .topbar select,
+.electron .topbar a { -webkit-app-region: no-drag; }
 .brand { font-weight: 700; letter-spacing: 0.3px; }
-.month-nav { display: flex; align-items: center; gap: 6px; }
-.month-nav button { padding: 2px 9px; }
-#month-label { min-width: 130px; text-align: center; font-weight: 600; }
+.electron .brand { padding-top: 2px; }
+.month-nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.month-nav button { padding: 2px 10px; }
+#month-label { text-align: center; font-weight: 600; }
 .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 .pill {
   font-size: 11px; padding: 3px 8px; border-radius: 999px;
@@ -955,3 +964,26 @@ input[name="issue"].issue-invalid {
 }
 .tour-skip-btn:hover { color: var(--fg-dim); background: none; border-color: transparent; }
 .tour-next-btn { min-width: 90px; }
+
+/* Jira/Tempo collapsible howto */
+.settings-howto { margin-bottom: 10px; }
+.settings-howto summary {
+  font-size: 12px; color: var(--fg-muted); cursor: pointer;
+  user-select: none; list-style: none; display: flex; align-items: center; gap: 6px;
+}
+.settings-howto summary::before { content: '▶'; font-size: 9px; transition: transform .15s; }
+.settings-howto[open] summary::before { transform: rotate(90deg); }
+.settings-howto summary:hover { color: var(--fg-dim); }
+.settings-howto-body {
+  margin-top: 8px; padding: 12px 14px;
+  background: var(--bg); border-radius: 8px; border: 1px solid var(--border);
+  font-size: 12px; line-height: 1.6; color: var(--fg-dim);
+}
+.settings-howto-body ol { margin: 4px 0 10px 16px; padding: 0; }
+.settings-howto-body ol:last-child { margin-bottom: 0; }
+.settings-howto-body strong { color: var(--fg); }
+.settings-howto-body a { color: var(--accent); }
+.settings-jira-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.settings-jira-test-result { font-size: 12px; }
+.settings-jira-test-result.ok  { color: var(--ok); }
+.settings-jira-test-result.err { color: var(--err); }

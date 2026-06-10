@@ -10,11 +10,6 @@
 <body>
   <header class="topbar">
     <div class="brand">⚡ WorkPulse</div>
-    <div class="month-nav">
-      <button id="prev-month" title="Previous month">‹</button>
-      <span id="month-label">—</span>
-      <button id="next-month" title="Next month">›</button>
-    </div>
     <div class="actions">
       <button id="today-btn" title="Today (T)">Today</button>
       <button id="refresh-btn" title="Refresh from APIs">⟳ Refresh</button>
@@ -27,6 +22,11 @@
 
   <main class="layout">
     <aside class="sidebar">
+      <div class="month-nav">
+        <button id="prev-month" title="Previous month">‹</button>
+        <span id="month-label">—</span>
+        <button id="next-month" title="Next month">›</button>
+      </div>
       <div id="calendar"></div>
       <div class="legend">
         <span><i class="dot dot-gh"></i> GitHub</span>
@@ -157,13 +157,6 @@
 
       <div class="settings-section">
         <h4>Google (Calendar + Gmail)</h4>
-        <p class="muted small" style="margin:0 0 8px">
-          Create an OAuth 2.0 client at <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud Console</a>
-          (type: Web application, redirect URI: <code id="google-redirect-uri-settings">…/auth/google/callback</code>).
-          Enable <em>Google Calendar API</em> and <em>Gmail API</em> in the project.
-        </p>
-        <div class="settings-row"><label>Client ID</label><input id="cfg-google-id" type="text" placeholder="GOOGLE_CLIENT_ID" autocomplete="off" /></div>
-        <div class="settings-row"><label>Client Secret</label><input id="cfg-google-secret" type="password" placeholder="GOOGLE_CLIENT_SECRET" autocomplete="off" /></div>
         <div id="settings-google-status" class="settings-google-status"></div>
         <div class="settings-google-actions">
           <button id="settings-google-connect" class="primary">Connect Google</button>
@@ -173,10 +166,32 @@
 
       <div class="settings-section">
         <h4>Jira / Tempo</h4>
+        <details class="settings-howto">
+          <summary>How to get tokens</summary>
+          <div class="settings-howto-body">
+            <strong>Jira API token</strong>
+            <ol>
+              <li>Open <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">id.atlassian.com → Security → API tokens</a></li>
+              <li>Click <strong>Create API token</strong>, give it a label (e.g. <em>WorkPulse</em>), copy the value</li>
+              <li>No scope selection needed — the token inherits your Jira account permissions</li>
+            </ol>
+            <strong>Tempo token</strong>
+            <ol>
+              <li>Open <a href="https://thefuntasty.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration" target="_blank" rel="noopener">Tempo → API Integration</a></li>
+              <li>Click <strong>New Token</strong>, give it a name</li>
+              <li>Enable scopes: <code>worklogs:read</code> and <code>worklogs:write</code> (or select all)</li>
+              <li>Copy the token</li>
+            </ol>
+          </div>
+        </details>
         <div class="settings-row"><label>Base URL</label><input id="cfg-jira-url" type="text" placeholder="https://your-org.atlassian.net" autocomplete="off" /></div>
         <div class="settings-row"><label>Email</label><input id="cfg-jira-email" type="text" placeholder="you@company.com" autocomplete="off" /></div>
         <div class="settings-row"><label>Jira API Token</label><input id="cfg-jira-token" type="password" placeholder="JIRA_API_TOKEN" autocomplete="off" /></div>
         <div class="settings-row"><label>Tempo Token</label><input id="cfg-tempo-token" type="password" placeholder="TEMPO_TOKEN" autocomplete="off" /></div>
+        <div class="settings-jira-actions">
+          <button id="settings-jira-test">Test connection</button>
+          <span id="settings-jira-test-result" class="settings-jira-test-result"></span>
+        </div>
       </div>
 
       <p class="muted small settings-note">

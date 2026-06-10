@@ -43,6 +43,8 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: 'WorkPulse',
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 16, y: 15 },
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,

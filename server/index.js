@@ -164,6 +164,31 @@ app.put('/api/mappings', (req, res) => {
 });
 
 // ---------- Jira ----------
+app.post('/api/jira/test', async (req, res) => {
+  const { baseUrl, email, apiToken, tempoToken } = req.body || {};
+  const result = { jira: null, tempo: null };
+  if (baseUrl && email && apiToken) {
+    try {
+      const r = await fetch(`${baseUrl}/rest/api/3/myself`, {
+        headers: { Authorization: 'Basic ' + Buffer.from(`${email}:${apiToken}`).toString('base64'), Accept: 'application/json' },
+      });
+      const data = await r.json();
+      if (r.ok) result.jira = { ok: true, displayName: data.displayName };
+      else result.jira = { ok: false, error: data.message || `HTTP ${r.status}` };
+    } catch (e) { result.jira = { ok: false, error: e.message }; }
+  }
+  if (tempoToken) {
+    try {
+      const r = await fetch('https://api.tempo.io/4/worklogs?limit=1', {
+        headers: { Authorization: `Bearer ${tempoToken}`, Accept: 'application/json' },
+      });
+      if (r.ok) result.tempo = { ok: true };
+      else result.tempo = { ok: false, error: `HTTP ${r.status}` };
+    } catch (e) { result.tempo = { ok: false, error: e.message }; }
+  }
+  res.json(result);
+});
+
 app.get('/api/jira/search', async (req, res) => {
   if (!env.baseUrl || !env.email || !env.apiToken)
     return res.status(400).json({ error: 'Jira not configured' });
@@ -273,7 +298,7 @@ app.get('/api/config', (req, res) => res.json(configStore.read()));
 
 app.put('/api/config', (req, res) => {
   try {
-    configStore.write(req.body || {});
+    configStore.merge(req.body || {});
     env = buildEnv();
     res.json({ ok: true });
   } catch (e) { res.status(400).json({ error: e.message }); }

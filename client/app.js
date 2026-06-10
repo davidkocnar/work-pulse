@@ -1940,6 +1940,7 @@ function renderTempo() {
         <li>Hit <strong>Send to Tempo</strong> — entries are logged for real</li>
       </ol>
     </li>`;
+    renderWeeklySummary();
     return;
   }
 
@@ -2011,6 +2012,7 @@ function renderTempo() {
     });
     list.appendChild(li);
   }
+  renderWeeklySummary();
 }
 
 // ---------- Favorites ----------
@@ -2406,17 +2408,13 @@ function updateGoogleStatusUI() {
   const connectBtn    = document.getElementById('settings-google-connect');
   const disconnectBtn = document.getElementById('settings-google-disconnect');
   if (!statusEl) return;
-  const configured = state.health.config?.google;
-  const connected  = state.health.googleConnected;
-  if (!configured) {
-    statusEl.textContent = 'Enter Client ID + Secret above, then save before connecting.';
-    statusEl.className = 'settings-google-status';
-  } else if (connected) {
+  const connected = state.health.googleConnected;
+  if (connected) {
     statusEl.textContent = '✓ Connected';
     statusEl.className = 'settings-google-status ok';
   } else {
-    statusEl.textContent = 'Credentials saved — click Connect Google to authorize.';
-    statusEl.className = 'settings-google-status warn';
+    statusEl.textContent = '';
+    statusEl.className = 'settings-google-status';
   }
   connectBtn.style.display    = connected ? 'none' : '';
   disconnectBtn.style.display = connected ? ''     : 'none';
@@ -2435,12 +2433,10 @@ async function openSettings() {
     document.getElementById('cfg-github-username').value = cfg.GITHUB_USERNAME   || '';
     document.getElementById('cfg-github-token').value    = cfg.GITHUB_TOKEN      || '';
     document.getElementById('cfg-slack-token').value     = cfg.SLACK_TOKEN       || '';
-    document.getElementById('cfg-jira-url').value        = cfg.JIRA_BASE_URL     || '';
+    document.getElementById('cfg-jira-url').value        = cfg.JIRA_BASE_URL     || 'https://thefuntasty.atlassian.net';
     document.getElementById('cfg-jira-email').value      = cfg.JIRA_EMAIL        || '';
     document.getElementById('cfg-jira-token').value      = cfg.JIRA_API_TOKEN    || '';
     document.getElementById('cfg-tempo-token').value     = cfg.TEMPO_TOKEN       || '';
-    document.getElementById('cfg-google-id').value       = cfg.GOOGLE_CLIENT_ID  || '';
-    document.getElementById('cfg-google-secret').value   = cfg.GOOGLE_CLIENT_SECRET || '';
   } catch (e) {
     toast('Could not load config: ' + e.message, 'err');
   }
@@ -2465,8 +2461,6 @@ async function saveSettings() {
         JIRA_EMAIL:          document.getElementById('cfg-jira-email').value.trim(),
         JIRA_API_TOKEN:      document.getElementById('cfg-jira-token').value.trim(),
         TEMPO_TOKEN:         document.getElementById('cfg-tempo-token').value.trim(),
-        GOOGLE_CLIENT_ID:    document.getElementById('cfg-google-id').value.trim(),
-        GOOGLE_CLIENT_SECRET:document.getElementById('cfg-google-secret').value.trim(),
       }),
     });
     await loadHealth();
@@ -2706,16 +2700,17 @@ function obStepDef(id) {
       <ol>
         <li>Open <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">id.atlassian.com → Security → API tokens</a></li>
         <li>Click <strong>Create API token</strong>, give it any label (e.g. <em>WorkPulse</em>), copy the value</li>
+        <li>No scope selection needed — the token inherits your Jira account permissions</li>
       </ol>
       <strong>Tempo token</strong>
       <ol>
-        <li>In Jira open <strong>Apps → Tempo</strong></li>
-        <li>In the Tempo sidebar click <strong>Settings</strong> (bottom left) → <strong>API Integration</strong></li>
-        <li>Click <strong>New Token</strong>, give it a name, select all scopes, copy the token</li>
-        <li>Not finding it? See <a href="https://support.tempo.io/hc/en-us/articles/360002249572" target="_blank" rel="noopener">Tempo docs → API Integration</a></li>
+        <li>Open <a href="https://thefuntasty.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration" target="_blank" rel="noopener">Tempo → API Integration</a></li>
+        <li>Click <strong>New Token</strong>, give it a name</li>
+        <li>Enable scopes: <code>worklogs:read</code> and <code>worklogs:write</code> (or select all)</li>
+        <li>Copy the token</li>
       </ol>`,
       fields: [
-        { key: 'JIRA_BASE_URL',   label: 'Jira base URL',      type: 'text',     placeholder: 'https://your-org.atlassian.net' },
+        { key: 'JIRA_BASE_URL',   label: 'Jira base URL',      type: 'text',     placeholder: 'https://your-org.atlassian.net', defaultValue: 'https://thefuntasty.atlassian.net' },
         { key: 'JIRA_EMAIL',      label: 'Atlassian email',    type: 'text',     placeholder: 'you@company.com' },
         { key: 'JIRA_API_TOKEN',  label: 'Jira API token',     type: 'password', placeholder: 'token from id.atlassian.com' },
         { key: 'TEMPO_TOKEN',     label: 'Tempo token',        type: 'password', placeholder: 'tempo API token' },
@@ -2726,18 +2721,6 @@ function obStepDef(id) {
       icon: '📅',
       title: 'Google Calendar & Gmail',
       subtitle: 'Meetings · Sent emails',
-      howto: `<ol>
-        <li>Open <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud Console → APIs & Services → Credentials</a></li>
-        <li>Create a project (or select an existing one)</li>
-        <li>Enable <strong>Google Calendar API</strong> and <strong>Gmail API</strong></li>
-        <li>Click <strong>+ Create Credentials → OAuth client ID</strong> → Application type: <em>Web application</em></li>
-        <li>Add Authorized redirect URI: <code>${window.location.origin}/auth/google/callback</code></li>
-        <li>Copy the <strong>Client ID</strong> and <strong>Client Secret</strong></li>
-      </ol>`,
-      fields: [
-        { key: 'GOOGLE_CLIENT_ID',     label: 'Client ID',     type: 'text',     placeholder: '….apps.googleusercontent.com' },
-        { key: 'GOOGLE_CLIENT_SECRET', label: 'Client Secret', type: 'password', placeholder: 'GOCSPX-…' },
-      ],
       canSkip: true,
       hasOauth: true,
     },
@@ -2775,7 +2758,7 @@ function showOnboardingFiltered() {
     if (id === 'github') return !cfg.github;
     if (id === 'slack')  return !cfg.slack;
     if (id === 'jira')   return !cfg.jira || !cfg.tempo;
-    if (id === 'google') return cfg.google && !state.health.googleConnected;
+    if (id === 'google') return !state.health.googleConnected;
     return true;
   });
   // If everything is already set up, just mark done silently
@@ -2868,8 +2851,12 @@ function renderObStep() {
       bodyHtml += '</div>';
     }
     if (def.hasOauth) {
-      bodyHtml += `<button id="ob-google-connect" class="ob-oauth-btn">Save credentials &amp; Connect Google →</button>
-        <p class="muted small" style="margin-top:6px">This opens Google's login page. You'll return here automatically.</p>`;
+      if (state.health.googleConnected) {
+        bodyHtml += `<div class="ob-oauth-connected">✓ Connected to Google Calendar &amp; Gmail</div>`;
+      } else {
+        bodyHtml += `<button id="ob-google-connect" class="ob-oauth-btn">Connect Google →</button>
+          <p class="muted small" style="margin-top:6px">Opens Google login in your browser. You'll return here automatically.</p>`;
+      }
     }
   }
 
@@ -2885,15 +2872,12 @@ function renderObStep() {
       JIRA_EMAIL:          'cfg-jira-email',
       JIRA_API_TOKEN:      'cfg-jira-token',
       TEMPO_TOKEN:         'cfg-tempo-token',
-      GOOGLE_CLIENT_ID:    'cfg-google-id',
-      GOOGLE_CLIENT_SECRET:'cfg-google-secret',
     };
     for (const f of def.fields) {
+      const obInput = document.querySelector(`[data-cfg-key="${f.key}"]`);
+      if (!obInput) continue;
       const settingsInput = document.getElementById(settingsMap[f.key]);
-      if (settingsInput?.value) {
-        const obInput = document.querySelector(`[data-cfg-key="${f.key}"]`);
-        if (obInput) obInput.value = settingsInput.value;
-      }
+      obInput.value = settingsInput?.value || f.defaultValue || '';
     }
   }
 
@@ -3104,6 +3088,29 @@ async function boot() {
     localStorage.removeItem('workpulse:tour-done');
     showTour();
   });
+  document.getElementById('settings-jira-test').addEventListener('click', async () => {
+    const resultEl = document.getElementById('settings-jira-test-result');
+    resultEl.textContent = 'Testing…';
+    resultEl.className = 'settings-jira-test-result';
+    const body = {
+      baseUrl:    document.getElementById('cfg-jira-url').value.trim(),
+      email:      document.getElementById('cfg-jira-email').value.trim(),
+      apiToken:   document.getElementById('cfg-jira-token').value.trim(),
+      tempoToken: document.getElementById('cfg-tempo-token').value.trim(),
+    };
+    try {
+      const data = await api('/api/jira/test', { method: 'POST', body: JSON.stringify(body) });
+      const parts = [];
+      if (data.jira)  parts.push(data.jira.ok  ? `✓ Jira (${data.jira.displayName})` : `✗ Jira: ${data.jira.error}`);
+      if (data.tempo) parts.push(data.tempo.ok ? '✓ Tempo' : `✗ Tempo: ${data.tempo.error}`);
+      const allOk = [data.jira, data.tempo].filter(Boolean).every(r => r.ok);
+      resultEl.textContent = parts.join('  ');
+      resultEl.className = 'settings-jira-test-result ' + (allOk ? 'ok' : 'err');
+    } catch (e) {
+      resultEl.textContent = '✗ ' + e.message;
+      resultEl.className = 'settings-jira-test-result err';
+    }
+  });
   document.getElementById('settings-onboarding-btn').addEventListener('click', () => { closeSettings(); showOnboarding(0); });
   document.getElementById('ob-back').addEventListener('click', obBack);
   document.getElementById('ob-next').addEventListener('click', obNext);
@@ -3219,6 +3226,8 @@ async function boot() {
     toast('Boot failed: ' + e.message, 'err');
     return;
   }
+
+  if (state.health.electronMode) document.body.classList.add('electron');
 
   const _cfg = state.health.config || {};
   const _anythingConfigured = _cfg.github || _cfg.slack || _cfg.jira || state.health.googleConnected;
