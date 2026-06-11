@@ -62,10 +62,8 @@ code { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   border-bottom: 1px solid var(--border);
   height: 44px;
 }
-.electron .topbar {
-  padding-left: 80px;
-  -webkit-app-region: drag;
-}
+.electron .topbar { -webkit-app-region: drag; }
+.electron:not(.electron-fullscreen) .topbar { padding-left: 80px; }
 .electron .topbar button,
 .electron .topbar input,
 .electron .topbar select,

@@ -1,0 +1,43 @@
+name: Build & Release DMG
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-dmg:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Write .env with bundled OAuth credentials
+        env:
+          APP_GITHUB_CLIENT_ID:     ${{ secrets.APP_GITHUB_CLIENT_ID }}
+          APP_GITHUB_CLIENT_SECRET: ${{ secrets.APP_GITHUB_CLIENT_SECRET }}
+          APP_SLACK_CLIENT_ID:      ${{ secrets.APP_SLACK_CLIENT_ID }}
+          APP_SLACK_CLIENT_SECRET:  ${{ secrets.APP_SLACK_CLIENT_SECRET }}
+          APP_GOOGLE_CLIENT_ID:     ${{ secrets.APP_GOOGLE_CLIENT_ID }}
+          APP_GOOGLE_CLIENT_SECRET: ${{ secrets.APP_GOOGLE_CLIENT_SECRET }}
+        run: |
+          echo "GITHUB_CLIENT_ID=$APP_GITHUB_CLIENT_ID"     >> .env
+          echo "GITHUB_CLIENT_SECRET=$APP_GITHUB_CLIENT_SECRET" >> .env
+          echo "SLACK_CLIENT_ID=$APP_SLACK_CLIENT_ID"       >> .env
+          echo "SLACK_CLIENT_SECRET=$APP_SLACK_CLIENT_SECRET"   >> .env
+          echo "GOOGLE_CLIENT_ID=$APP_GOOGLE_CLIENT_ID"     >> .env
+          echo "GOOGLE_CLIENT_SECRET=$APP_GOOGLE_CLIENT_SECRET" >> .env
+
+      - name: Build DMG
+        run: npm run dist
+
+      - name: Attach DMGs to release
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.dmg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

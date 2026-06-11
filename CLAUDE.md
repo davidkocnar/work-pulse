@@ -38,8 +38,9 @@ All routes are defined in `server/index.js`. Data fetchers are separate modules:
 
 ### Frontend (`client/`)
 
-Single file: `client/app.js` (~77KB, no bundler). Vanilla JS with a module-scoped `state` object:
+Vanilla JS ES modules (no bundler, `type="module"` in `index.html`). Shared state lives in `state.js`; cross-module render calls go through the `render` / `actions` callback registry in `render.js` (filled by `boot()`) to avoid circular imports.
 
+**State shape** (`client/state.js`):
 ```js
 state = {
   year, month,           // currently viewed month
@@ -52,36 +53,60 @@ state = {
 }
 ```
 
+**Client module map** — read only the file(s) relevant to your task:
+
+| File | What's inside |
+|---|---|
+| `utils.js` | Pure helpers: date/time, duration, HTML escaping, Jira key extraction |
+| `storage.js` | localStorage: `loadTempo/saveTempo(data)`, `loadFavorites/saveFavorites(data)`, issue title cache |
+| `state.js` | `state` singleton (imports storage.js) |
+| `render.js` | `render` + `actions` callback registry — breaks circular import chains |
+| `api.js` | `api(path, opts)` fetch wrapper |
+| `helpers.js` | `projectFor`, `issueKeyFromMapping`, `rebuildDayIndex` (need state.mappings) |
+| `calendar.js` | `renderStatusPill`, `renderCalendar`, `renderWeeklySummary` |
+| `timeline.js` | Two-column day layout: bubbles, lane layout, event merging, drag-to-create, `renderDay` |
+| `tempo-panel.js` | Issue autocomplete, draft entries, `addEventToTempo`, `renderTempo`, `sendTempo` |
+| `favorites.js` | Favorites panel + suggestions modal |
+| `settings.js` | Settings + Mappings modals |
+| `onboarding.js` | Onboarding wizard + feature tour |
+| `app.js` | Data loading (`loadHealth/Events/Worklogs`), navigation (`selectDay`, `shiftDay`), `toast`, `boot()` |
+| `demo.js` | Fictional dataset for `?demo=1` mode |
+
+**Callback pattern:** modules that trigger cross-module renders call `render.day()`, `render.tempo()`, etc. or `actions.toast()`, `actions.selectDay()`. `boot()` in `app.js` fills all callbacks with the real functions before data loading starts.
+
 **Persistent state:** `localStorage` keys `workpulse:tempo` (drafts) and `workpulse:favorites`.
 
 **Rendering pattern:** Declarative HTML string generation (no VDOM). Key render functions:
-- `renderCalendar()` — monthly mini-calendar with per-day event dots
-- `renderWeeklySummary()` — left sidebar: logged hours per project + draft totals
-- `buildDayTimeline(day)` → `renderTimeline()` → `renderTimelineRow()` — chronological unified timeline in the center panel
-- `renderTempo()` — right panel draft entries
+- `renderCalendar()` — monthly mini-calendar with per-day event dots (`calendar.js`)
+- `renderWeeklySummary()` — left sidebar: logged hours per project + draft totals (`calendar.js`)
+- `renderDay()` — two-column timeline + Tempo column for selected day (`timeline.js`)
+- `renderTempo()` — right panel draft entries (`tempo-panel.js`)
 
-**Filter state:** `timelineFilters` (module-level `Set`) controls which sources appear in the center timeline. Calendar events are intentionally excluded from the timeline and mini-calendar dots — they appear only in the right Tempo panel as `.wb-meeting` blocks.
+**Filter state:** `timelineFilters` (module-level `Set` in `timeline.js`) controls which sources appear in the center timeline. Calendar events are intentionally excluded from the timeline and mini-calendar dots — they appear only in the Tempo column as `.wb-meeting` blocks.
 
-**Key utilities:**
+**Key utilities** (all in `utils.js`):
 - `parseDuration(str)` — flexible parsing: "90m", "1h 30m", "1.5h", plain number (minutes)
 - `formatDuration(seconds)` — "1h 30m" / "45m"
 - `hhmm(isoString)` — extract HH:MM from ISO datetime
 - `localDay(isoString)` — YYYY-MM-DD in local time
-- `projectFor(event)` — looks up Jira project key from mappings
 
 **Event-to-draft flow:**
-1. User clicks an event row in the timeline
-2. `addEventToTempo(event)` creates a draft entry in `state.tempoByDay[date]`
+1. User clicks an event bubble in the timeline (`timeline.js` → `actions.addEventToTempo`)
+2. `addEventToTempo(event)` in `tempo-panel.js` creates a draft in `state.tempoByDay[date]`
 3. Draft gets `sourceIds: [event.id]` for deduplication
-4. `renderDay()` marks the row `.added` and shows a `.logged-tag` inline
-5. "Send to Tempo" calls `POST /api/tempo` for each draft entry
+4. `render.day()` + `render.tempo()` re-render both panels
+5. "Send to Tempo" (`sendTempo` in `tempo-panel.js`) calls `POST /api/tempo`
 
 ## Key files for common tasks
 
-- Adding a new data source: add fetcher module in `server/`, call it in the `/api/events` handler in `server/index.js`, extend `state.events` and `buildDayTimeline()` in `client/app.js`
-- UI changes: `client/app.js` (logic) + `client/styles.css` (styles) + `client/index.html` (structure)
+- Adding a new data source: add fetcher module in `server/`, call it in `/api/events` in `server/index.js`, extend `state.events` and `buildDayTimeline()` in `client/timeline.js`
+- Timeline layout changes: `client/timeline.js` + `client/styles.css`
+- Tempo panel / draft entries: `client/tempo-panel.js`
+- Settings or Mappings modal: `client/settings.js` + `client/index.html`
+- Onboarding wizard or feature tour: `client/onboarding.js`
+- Favorites panel: `client/favorites.js`
 - New API endpoint: `server/index.js`
-- Credential/config fields: `server/config-store.js` whitelist + settings modal in `client/index.html` + `client/app.js` settings save/load
+- Credential/config fields: `server/config-store.js` whitelist + `client/settings.js` + `client/onboarding.js`
 
 ## Gitignored sensitive files
 

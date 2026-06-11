@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, shell, Menu, Tray, nativeImage } = require('electron');
+const { app, BrowserWindow, shell, Menu, Tray, nativeImage, ipcMain } = require('electron');
 const path = require('path');
 
 // Must be set before any server module is required so data-dir.js picks it up
@@ -48,6 +48,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
     },
   });
 
@@ -79,8 +80,12 @@ function createWindow() {
     }
   });
 
+  win.on('enter-full-screen', () => win.webContents.send('fullscreen-change', true));
+  win.on('leave-full-screen',  () => win.webContents.send('fullscreen-change', false));
   win.on('closed', () => { win = null; });
 }
+
+ipcMain.handle('is-fullscreen', () => win?.isFullScreen() ?? false);
 
 function createTray() {
   // Use a blank 16x16 template image as fallback — replace build/tray.png with a real icon

@@ -2,7 +2,7 @@
 
 Personal productivity tool that aggregates daily activity from GitHub, Slack, Google Calendar, and Gmail, then helps log time to Jira/Tempo.
 
-Runs locally as a Node.js server — no cloud, no database, credentials stay on your machine.
+Runs entirely locally — no cloud, no database, credentials stay on your machine.
 
 ## Features
 
@@ -12,60 +12,78 @@ Runs locally as a Node.js server — no cloud, no database, credentials stay on 
 - **Calendar awareness** — accepted/tentative/declined meeting states, overlap deduplication
 - **Mappings** — map GitHub repos and Slack channels to Jira project keys for automatic prefilling
 
-## Installation
+---
+
+## Install — macOS app (recommended)
+
+Download the latest `.dmg` from the [Releases page](../../releases/latest), open it, and drag WorkPulse to Applications.
+
+On first launch macOS may ask you to confirm — right-click the app → **Open**.
+
+OAuth for GitHub, Slack, and Google is pre-configured in the app. The onboarding wizard walks you through connecting each service. You only need to provide your personal **Jira and Tempo tokens**:
+
+| Token | Where to get it |
+|---|---|
+| Jira API token | [id.atlassian.com → Security → API tokens](https://id.atlassian.com/manage-profile/security/api-tokens) → Create API token |
+| Tempo token | [Tempo → API Integration](https://thefuntasty.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration) → New Token — enable `worklogs:read` and `worklogs:write` |
+
+User data (credentials, mappings, drafts) is stored in `~/Library/Application Support/WorkPulse/` — survives app updates.
+
+---
+
+## Install — run from source (developers)
+
+Requires **Node.js 18+**.
 
 ```bash
-git clone <repo>
+git clone <repo-url>
 cd workpulse
 npm install
 ```
 
-## Configuration
-
-Copy `.env.example` to `.env` and fill in your credentials, or use the in-app Settings / Onboarding wizard on first launch.
-
-```env
-GITHUB_TOKEN=ghp_xxx
-GITHUB_USERNAME=yourhandle
-SLACK_TOKEN=xoxp-xxx
-JIRA_BASE_URL=https://yourorg.atlassian.net
-JIRA_EMAIL=you@yourorg.com
-JIRA_API_TOKEN=xxx
-TEMPO_TOKEN=xxx
-GOOGLE_CLIENT_ID=xxx
-GOOGLE_CLIENT_SECRET=xxx
-```
-
-Google Calendar and Gmail require OAuth — connect via Settings after filling in the client credentials.
-
-## Running
+Copy `.env.example` to `.env` and fill in the OAuth app credentials (ask the team for the shared values).
 
 ```bash
-npm start        # starts server on localhost:3333, opens browser automatically
+npm start   # starts server on localhost:3333, opens browser automatically
 ```
+
+OAuth for GitHub, Slack, and Google works the same way as in the DMG — connect via the in-app Settings or onboarding wizard.
+
+---
 
 ## Demo mode
 
-To preview the app with fictional data (no credentials needed):
+Preview the app with fictional data — no credentials needed:
 
 ```
 http://localhost:3333/?demo=1
 ```
 
-Shows a sample day with GitHub commits, Slack messages, calendar meetings (accepted and tentative), real Tempo worklogs, and a draft entry — useful for screenshots or onboarding colleagues.
+Shows a sample day with GitHub commits, Slack messages, calendar meetings, and Tempo worklogs. Useful for screenshots or showing the app to someone new.
 
-## Distribution (macOS app)
+---
 
-Build a standalone `.dmg` that colleagues can install without Node.js:
+## Build and release DMG
+
+Requires the OAuth credentials in `.env` (they get bundled into the app so users don't need them).
 
 ```bash
 npm run dist          # builds arm64 + x64 DMG into dist/
-npm run electron      # run locally as Electron app (dev)
+npm run electron      # run as Electron app locally (dev)
 ```
 
-Distributing without an Apple Developer certificate: recipients right-click the `.app` → Open on first launch.
+**Publishing a new release:**
 
-User data (credentials, mappings, cache) is stored in `~/Library/Application Support/WorkPulse/` — separate from the app bundle and survives updates.
+1. Bump `version` in `package.json`, commit and push
+2. On GitHub: **Releases → Draft a new release → Create a new tag** (e.g. `v1.9`) → **Publish release**
+3. GitHub Actions builds the DMG automatically and attaches it to the release
+
+Colleagues then always find the latest version at the Releases page.
+
+> **First-time setup:** add the six OAuth credentials as repository secrets under **Settings → Secrets → Actions**:
+> `APP_GITHUB_CLIENT_ID`, `APP_GITHUB_CLIENT_SECRET`, `APP_SLACK_CLIENT_ID`, `APP_SLACK_CLIENT_SECRET`, `APP_GOOGLE_CLIENT_ID`, `APP_GOOGLE_CLIENT_SECRET`
+
+---
 
 ## Project structure
 
@@ -82,8 +100,9 @@ server/
   data-dir.js       Resolves user data path (local vs Electron)
 client/
   index.html
-  app.js            Single-file vanilla JS frontend (~2 500 lines)
+  app.js            Single-file vanilla JS frontend
   styles.css
 electron/
   main.js           Electron entry point
+  preload.js        Context bridge (fullscreen detection)
 ```
