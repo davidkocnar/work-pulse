@@ -40,7 +40,14 @@ jobs:
       - name: Set version from release tag
         run: |
           TAG="${{ github.event.release.tag_name }}"
-          npm version "${TAG#v}" --no-git-tag-version
+          VERSION="${TAG#v}"
+          CURRENT_VERSION="$(node -p "require('./package.json').version")"
+
+          if [ "$CURRENT_VERSION" != "$VERSION" ]; then
+            npm version "$VERSION" --no-git-tag-version
+          else
+            echo "package.json already at version $VERSION, skipping"
+          fi
 
       - name: Build DMG
         run: npm run dist
