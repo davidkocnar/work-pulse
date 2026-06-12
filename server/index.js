@@ -330,6 +330,7 @@ app.get('/auth/github/callback', async (req, res) => {
     const user = await userRes.json();
     configStore.merge({ GITHUB_TOKEN: td.access_token, GITHUB_USERNAME: user.login });
     env = buildEnv();
+    cache.invalidate(`github:${user.login}`);
     if (process.env.WORKPULSE_ELECTRON === '1') {
       _broadcastOAuth({ github: 'connected', username: user.login });
       res.send(_oauthSuccessPage('GitHub connected'));
@@ -368,6 +369,7 @@ app.get('/auth/slack/callback', async (req, res) => {
     if (!token) throw new Error('No user token returned — ensure user scopes are configured in your Slack app.');
     configStore.merge({ SLACK_TOKEN: token });
     env = buildEnv();
+    cache.invalidate('slack:');
     if (process.env.WORKPULSE_ELECTRON === '1') {
       _broadcastOAuth({ slack: 'connected' });
       res.send(_oauthSuccessPage('Slack connected'));

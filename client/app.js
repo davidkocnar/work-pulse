@@ -353,9 +353,13 @@ async function boot() {
         toast(msg, 'ok');
       }
     }
-    if (data.github === 'connected')  _sseResume(`GitHub connected as ${state.health.githubUsername || 'user'}.`);
-    else if (data.slack === 'connected')   _sseResume('Slack connected.');
-    else if (data.google === 'connected')  _sseResume('Google connected.');
+    if (data.github === 'connected') {
+      _sseResume(`GitHub connected as ${state.health.githubUsername || 'user'}.`);
+      loadEvents({ refresh: true }).then(() => { renderCalendar(); renderDay(); });
+    } else if (data.slack === 'connected') {
+      _sseResume('Slack connected.');
+      loadEvents({ refresh: true }).then(() => { renderCalendar(); renderDay(); });
+    } else if (data.google === 'connected')  _sseResume('Google connected.');
     else if (data.github_error)  toast('GitHub connection failed: ' + data.github_error, 'err');
     else if (data.slack_error)   toast('Slack connection failed: '  + data.slack_error,  'err');
     else if (data.google_error)  toast('Google connection failed: ' + data.google_error, 'err');
@@ -408,7 +412,7 @@ async function boot() {
     showOnboardingFiltered();
   }
 
-  await Promise.allSettled([loadEvents(), loadWorklogs()]);
+  await Promise.allSettled([loadEvents({ refresh: _oauthReturn }), loadWorklogs()]);
   renderCalendar();
   pickInitialDay();
 }
