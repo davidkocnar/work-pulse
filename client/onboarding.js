@@ -252,6 +252,24 @@ export function renderObStep() {
   document.getElementById('ob-back').style.visibility = isFirst ? 'hidden' : 'visible';
   document.getElementById('ob-next').textContent = def.nextLabel || (isLast ? 'Finish' : 'Next →');
 
+  // Tutorial button — only on the last step
+  document.getElementById('ob-tutorial')?.remove();
+  if (isLast) {
+    const tutBtn = document.createElement('button');
+    tutBtn.id = 'ob-tutorial';
+    tutBtn.textContent = '▶ Tutorial';
+    tutBtn.addEventListener('click', async () => {
+      document.getElementById('onboarding-modal').classList.add('hidden');
+      localStorage.setItem('workpulse:onboarding-done', '1');
+      localStorage.removeItem('workpulse:tour-done');
+      await actions.loadHealth();
+      render.statusPill();
+      _tourStepIdx = 0;
+      _renderTourStep();
+    });
+    document.getElementById('ob-next').before(tutBtn);
+  }
+
   // Wire OAuth buttons
   if (def.hasOauth) {
     document.getElementById('ob-google-connect')?.addEventListener('click', async () => {
