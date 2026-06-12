@@ -213,6 +213,60 @@ function monthBounds(year, month) {
   };
 }
 
+// Search API fallback for months outside the Events API window (~300 most recent events).
+// Used for any month older than the previous calendar month.
+async function fetchHistorical({ year, month, token, username }) {
+  const { start, end } = monthBounds(year, month);
+  const startStr = start.toISOString().slice(0, 10);
+  const endStr = new Date(end - 1).toISOString().slice(0, 10);
+  const out = [];
+
+  // Commits authored in the month
+  try {
+    const url = `https://api.github.com/search/commits?q=author:${encodeURIComponent(username)}+author-date:${startStr}..${endStr}&per_page=100&sort=author-date&order=asc`;
+    const data = await ghFetch(url, token);
+    for (const item of (data.items || [])) {
+      const sha = item.sha || '';
+      const msg = item.commit?.message || '';
+      const repo = item.repository?.full_name || null;
+      out.push({
+        id: `search-${sha}`,
+        time: item.commit?.author?.date || item.commit?.committer?.date,
+        source: 'github',
+        repoOrChannel: repo,
+        kind: 'commit',
+        title: msg.split('\n')[0] || `commit ${sha.slice(0, 7)}`,
+        body: msg,
+        url: item.html_url,
+        sha: sha.slice(0, 7),
+      });
+    }
+  } catch { /* search unavailable or rate limited */ }
+
+  // PRs opened in the month
+  try {
+    const url = `https://api.github.com/search/issues?q=is:pr+author:${encodeURIComponent(username)}+created:${startStr}..${endStr}&per_page=100&sort=created&order=asc`;
+    const data = await ghFetch(url, token);
+    for (const item of (data.items || [])) {
+      const repo = item.repository_url?.replace('https://api.github.com/repos/', '') || null;
+      const merged = item.pull_request?.merged_at;
+      out.push({
+        id: `search-pr-${repo}-${item.number}`,
+        time: item.created_at,
+        source: 'github',
+        repoOrChannel: repo,
+        kind: merged ? 'pr-merged' : 'pr-opened',
+        title: item.title,
+        url: item.html_url,
+        prNumber: item.number,
+      });
+    }
+  } catch { /* ignore */ }
+
+  out.sort((a, b) => new Date(a.time) - new Date(b.time));
+  return out;
+}
+
 async function fetchEvents({ year, month, token, username, refresh }) {
   if (!token || !username) return { events: [], skipped: true, reason: 'GitHub not configured' };
   const key = `github:${username}:${year}-${String(month).padStart(2, '0')}`;
@@ -221,35 +275,45 @@ async function fetchEvents({ year, month, token, username, refresh }) {
     if (cached) return { events: cached, cached: true };
   }
 
-  const { start, end } = monthBounds(year, month);
-  const raw = [];
-  let stopped = false;
+  // Events API returns only the last ~300 events. For months older than last month, use Search API.
+  const now = new Date();
+  const lastMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const monthStart = new Date(Date.UTC(year, month - 1, 1));
+  const useSearch = monthStart < lastMonthStart;
 
-  for (let page = 1; page <= MAX_PAGES && !stopped; page++) {
-    const url = `https://api.github.com/users/${encodeURIComponent(username)}/events?per_page=${PER_PAGE}&page=${page}`;
-    let batch;
-    try {
-      batch = await ghFetch(url, token);
-    } catch (e) {
-      if (raw.length === 0) throw e;
-      break;
-    }
-    if (!Array.isArray(batch) || batch.length === 0) break;
+  let out;
+  if (useSearch) {
+    out = await fetchHistorical({ year, month, token, username });
+  } else {
+    const { start, end } = monthBounds(year, month);
+    const raw = [];
+    let stopped = false;
 
-    for (const ev of batch) {
-      const t = new Date(ev.created_at);
-      if (t < start) { stopped = true; break; }
-      if (t >= end) continue;
-      raw.push(ev);
+    for (let page = 1; page <= MAX_PAGES && !stopped; page++) {
+      const url = `https://api.github.com/users/${encodeURIComponent(username)}/events?per_page=${PER_PAGE}&page=${page}`;
+      let batch;
+      try {
+        batch = await ghFetch(url, token);
+      } catch (e) {
+        if (raw.length === 0) throw e;
+        break;
+      }
+      if (!Array.isArray(batch) || batch.length === 0) break;
+
+      for (const ev of batch) {
+        const t = new Date(ev.created_at);
+        if (t < start) { stopped = true; break; }
+        if (t >= end) continue;
+        raw.push(ev);
+      }
+      if (batch.length < PER_PAGE) break;
     }
-    if (batch.length < PER_PAGE) break;
+
+    await hydrate(raw, token);
+    out = [];
+    for (const ev of raw) out.push(...transform(ev));
+    out.sort((a, b) => new Date(a.time) - new Date(b.time));
   }
-
-  await hydrate(raw, token);
-
-  const out = [];
-  for (const ev of raw) out.push(...transform(ev));
-  out.sort((a, b) => new Date(a.time) - new Date(b.time));
 
   cache.set(key, out);
   return { events: out, cached: false };
