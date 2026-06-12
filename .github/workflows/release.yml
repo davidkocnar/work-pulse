@@ -37,6 +37,11 @@ jobs:
           echo "GOOGLE_CLIENT_ID=$APP_GOOGLE_CLIENT_ID"     >> .env
           echo "GOOGLE_CLIENT_SECRET=$APP_GOOGLE_CLIENT_SECRET" >> .env
 
+      - name: Set version from release tag
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          npm version "${TAG#v}" --no-git-tag-version
+
       - name: Build DMG
         run: npm run dist
 
